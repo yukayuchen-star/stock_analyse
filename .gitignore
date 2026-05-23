@@ -32,8 +32,9 @@ ENV/
 .ipynb_checkpoints/
 *.ipynb
 
-# Data & cache
-data/
+# Output & cache (runtime, not source)
+output/
+cache/
 *.csv
 *.parquet
 *.feather

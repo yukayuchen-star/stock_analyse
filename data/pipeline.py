@@ -1,0 +1,101 @@
+from datetime import date, timedelta
+
+import pandas as pd
+from loguru import logger
+
+from config.settings import settings
+from config.stocks import STOCK_POOL, BENCHMARKS
+from data.cache import SQLiteCache
+from data.yfinance_source import YFinanceSource
+from data.fred_source import FREDSource, FRED_SERIES
+from data.finnhub_source import FinnhubSource
+from data.alpha_vantage_source import AlphaVantageSource
+from utils.time_utils import today_str
+
+
+class DataPipeline:
+    """统一数据编排：各源初始化、获取、缓存透明化。"""
+
+    def __init__(self) -> None:
+        self.cache   = SQLiteCache(settings.cache_dir)
+        self.yf      = YFinanceSource(self.cache)
+        self.fred    = FREDSource(self.cache)
+        self.finnhub = FinnhubSource(self.cache)
+        self.av      = AlphaVantageSource(self.cache)
+
+    # ── 价格 ──────────────────────────────────────────────
+
+    def get_price(self, ticker: str) -> pd.DataFrame:
+        end   = today_str()
+        start = (date.today() - timedelta(days=settings.price_history_days)).strftime("%Y-%m-%d")
+        return self.yf.get_price(ticker, start, end)
+
+    def get_all_prices(self) -> dict[str, pd.DataFrame]:
+        """获取全部股票 + 基准的日线数据。"""
+        result: dict[str, pd.DataFrame] = {}
+        for ticker in STOCK_POOL + BENCHMARKS:
+            df = self.get_price(ticker)
+            if not df.empty:
+                result[ticker] = df
+            else:
+                logger.warning(f"No price data: {ticker}")
+        return result
+
+    # ── 新闻 ──────────────────────────────────────────────
+
+    def get_news(self, ticker: str, days: int = 7) -> pd.DataFrame:
+        """Finnhub 优先，fallback 到 yfinance。"""
+        df = self.finnhub.get_news(ticker, days)
+        if df.empty:
+            logger.debug(f"Finnhub news empty for {ticker}, fallback to yfinance")
+            df = self.yf.get_news(ticker, days)
+        return df
+
+    # ── 宏观 ──────────────────────────────────────────────
+
+    def get_macro(self) -> dict[str, pd.DataFrame]:
+        """获取全部 FRED 宏观序列。"""
+        return self.fred.get_all()
+
+    def get_macro_snapshot(self) -> dict[str, float]:
+        """返回各序列最新值的快照字典，便于信号层使用。"""
+        result = {}
+        for sid in FRED_SERIES:
+            val = self.fred.get_latest(sid)
+            if val is not None:
+                result[sid] = val
+        return result
+
+    # ── 财报 ──────────────────────────────────────────────
+
+    def get_earnings(self, ticker: str) -> pd.DataFrame:
+        return self.av.get_income_quarterly(ticker)
+
+    # ── 全量拉取（main.py 入口）──────────────────────────
+
+    def fetch_all(self) -> dict:
+        """
+        P6 入口：一次性拉取全部数据，返回结构化字典供信号层消费。
+        {
+            "prices":   dict[ticker, DataFrame],
+            "news":     dict[ticker, DataFrame],
+            "macro":    dict[series_id, DataFrame],
+            "snapshot": dict[series_id, float],
+        }
+        """
+        logger.info("── 数据层：开始拉取 ──")
+
+        logger.info(f"  价格数据 ({len(STOCK_POOL + BENCHMARKS)} 只)…")
+        prices = self.get_all_prices()
+
+        logger.info("  新闻数据…")
+        news = {}
+        for ticker in STOCK_POOL:
+            news[ticker] = self.get_news(ticker)
+
+        logger.info("  宏观数据 (FRED)…")
+        macro    = self.get_macro()
+        snapshot = self.get_macro_snapshot()
+
+        logger.info(f"── 数据层完成：{len(prices)} 只价格 / {len(macro)} 个宏观序列 ──")
+        return {"prices": prices, "news": news, "macro": macro, "snapshot": snapshot}
