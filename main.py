@@ -6,6 +6,8 @@ from config.settings import settings
 from config.stocks import STOCK_POOL, BENCHMARKS, BUCKETS
 from data.pipeline import DataPipeline
 from signals.quant.factor_engine import compute_quant_signal
+from signals.macro.macro_signal  import compute_macro_signal
+from signals.chan.chan_signal     import compute_chan_signal
 from utils.time_utils import today_str, prev_trading_day
 
 
@@ -48,11 +50,33 @@ def run() -> None:
             quant_signals[ticker] = result
             logger.info(f"    {ticker:5s}: {result.reasoning}")
 
-    # ── P3: 宏观信号层（待实现）──────────────────────────
-    logger.warning("[P3] 宏观信号层待实现")
+    # ── P3: 宏观信号层 ───────────────────────────────────────
+    logger.info("── P3 宏观信号层 ──")
+    macro = compute_macro_signal(snapshot, prices, BUCKETS)
+    logger.info(
+        f"  VIX={macro.vix_level:.1f} [{macro.vix_regime}] "
+        f"仓位上限={macro.position_limit:.0%}  "
+        f"yield_spread={macro.yield_spread:+.2f}%  "
+        f"macro_score={macro.score:+.3f}"
+    )
+    logger.info(f"  桶 IR: " + "  ".join(
+        f"{k}={macro.bucket_ir[k]:+.3f}(score={macro.bucket_scores[k]:+.2f})"
+        for k in macro.bucket_ir
+    ))
 
-    # ── P4: 缠论信号层（等待精髓输入）───────────────────
-    logger.warning("[P4] 缠论信号层待实现（等待精髓输入）")
+    # ── P4: 缠论信号层 ───────────────────────────────────────
+    logger.info("── P4 缠论信号层 ──")
+    chan_signals = {}
+    for ticker in STOCK_POOL:
+        result = compute_chan_signal(ticker, prices)
+        chan_signals[ticker] = result
+        point = result.buy_point_type or result.sell_point_type or "neutral"
+        logger.info(
+            f"  {ticker:5s}: {point:8s} score={result.score:+.2f} "
+            f"笔={result.stroke_count:2d} 中枢={'有' if result.current_pivot else '无'} "
+            f"周线={result.weekly_trend:7s} res={result.level_resonance} "
+            f"conf={result.confidence:.2f}"
+        )
 
     # ── P5: 决策层（待实现）──────────────────────────────
     logger.warning("[P5] 决策层待实现")
@@ -74,7 +98,7 @@ def run() -> None:
         )
 
     logger.info(f"{'='*50}")
-    logger.info("P1 + P2 量化信号层运行完毕 ✓")
+    logger.info("P1 + P2 + P3 + P4 运行完毕 ✓")
 
 
 def _score_bar(score: float, width: int = 10) -> str:
