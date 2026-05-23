@@ -164,9 +164,11 @@ def _compute_metrics(trades: List[Trade], df: pd.DataFrame) -> dict:
     total_ret   = float(np.prod([1 + p for p in pnls]) - 1)
 
     # 简化 Sharpe：以笔均收益 / 标准差 × sqrt(252/均持有天数) 近似
+    # 胜率接近 100% 时方差趋零导致 Sharpe 爆炸，cap 至 5.0
     avg_hold = float(np.mean([t.holding_days for t in trades]))
     if len(pnls) > 1 and np.std(pnls) > 1e-9:
         sharpe = (avg_pnl / np.std(pnls)) * np.sqrt(252 / max(avg_hold, 1))
+        sharpe = min(sharpe, 5.0)
     else:
         sharpe = 0.0
 
@@ -231,10 +233,13 @@ def run_backtest(ticker: str, df: pd.DataFrame) -> BacktestResult:
 
     backtest_start = df.index[WARMUP_BARS]
     backtest_df    = df[df.index >= backtest_start].copy()
+    short_history  = len(backtest_df) < 300  # 回测区间不足 300 TD，结论参考性有限
 
     # 提取信号（使用全量数据，无前视偏差）
     all_events = extract_chan_events(df)
     events     = [e for e in all_events if e.date >= backtest_start]
+
+    warn = "  ⚠️ 历史不足(<300TD)" if short_history else ""
 
     if not events:
         base.period_start = backtest_start
@@ -242,7 +247,7 @@ def run_backtest(ticker: str, df: pd.DataFrame) -> BacktestResult:
         base.reasoning    = (
             f"回测区间无缠论信号 "
             f"({backtest_start.date()}~{df.index[-1].date()}，"
-            f"{len(backtest_df)}根K线)"
+            f"{len(backtest_df)}根K线){warn}"
         )
         return base
 
@@ -252,7 +257,7 @@ def run_backtest(ticker: str, df: pd.DataFrame) -> BacktestResult:
     if not metrics:
         base.period_start = backtest_start
         base.period_end   = df.index[-1]
-        base.reasoning    = "无成交记录（信号未触发有效入场）"
+        base.reasoning    = f"无成交记录（信号未触发有效入场）{warn}"
         return base
 
     sig_desc = "  ".join(
@@ -264,7 +269,7 @@ def run_backtest(ticker: str, df: pd.DataFrame) -> BacktestResult:
         f"交易{metrics['num_trades']}笔  胜率{metrics['win_rate']:.0%}  "
         f"总收益{metrics['total_return']:+.1%}  基准{metrics['benchmark_return']:+.1%}  "
         f"Sharpe={metrics['sharpe']:.2f}  MDD={metrics['max_drawdown']:.1%}  "
-        f"[ {sig_desc} ]"
+        f"[ {sig_desc} ]{warn}"
     )
     logger.debug(f"[Backtest] {ticker}: {reasoning}")
 
