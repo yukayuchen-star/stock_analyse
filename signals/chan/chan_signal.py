@@ -209,9 +209,11 @@ def compute_chan_signal(
         return ChanSignalResult(ticker=ticker, timestamp=pd.Timestamp.now(),
                                 reasoning="无价格数据")
 
-    if len(df) < 60:
+    # 200 raw bars → ~150 processed bars，至少能形成稳定笔/中枢结构
+    # 推荐 550+ TD（price_history_days=800），可达 ~413 processed bars
+    if len(df) < 200:
         return ChanSignalResult(ticker=ticker, timestamp=pd.Timestamp.now(),
-                                reasoning=f"数据不足({len(df)}根，需>=60)")
+                                reasoning=f"数据不足({len(df)}根，需>=200，建议550+)")
 
     try:
         # ── 1-3. 结构识别 ─────────────────────────────────────

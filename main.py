@@ -8,6 +8,7 @@ from data.pipeline import DataPipeline
 from signals.quant.factor_engine import compute_quant_signal
 from signals.macro.macro_signal  import compute_macro_signal
 from signals.chan.chan_signal     import compute_chan_signal
+from decision.strategy           import make_decision, StockDecision
 from utils.time_utils import today_str, prev_trading_day
 
 
@@ -78,8 +79,35 @@ def run() -> None:
             f"conf={result.confidence:.2f}"
         )
 
-    # ── P5: 决策层（待实现）──────────────────────────────
-    logger.warning("[P5] 决策层待实现")
+    # ── P5: 决策层 ───────────────────────────────────────
+    logger.info("── P5 决策层 ──")
+    decisions: dict[str, StockDecision] = {}
+    for ticker in STOCK_POOL:
+        d = make_decision(
+            ticker=ticker,
+            chan=chan_signals[ticker],
+            quant=quant_signals[ticker],
+            macro=macro,
+            prices=prices,
+        )
+        decisions[ticker] = d
+
+    # ── 决策排行（按 final_score 降序）────────────────────
+    logger.info("── P5 综合评级排行 ──")
+    for d in sorted(decisions.values(), key=lambda x: x.final_score, reverse=True):
+        bar   = _score_bar(d.final_score)
+        flags = " | ".join(d.risk_flags) if d.risk_flags else "—"
+        pivot = d.chan_signal.current_pivot
+        entry = f"{d.entry_price_range[0]:.1f}~{d.entry_price_range[1]:.1f}"
+        logger.info(
+            f"  {d.ticker:5s} [{d.rating:11s}] {bar} {d.final_score:+.3f}  "
+            f"pos={d.suggested_position:.0%}  "
+            f"SL={d.stop_loss:.1f}  TP={d.take_profit:.1f}  "
+            f"entry={entry}"
+        )
+        logger.info(f"         得分: {d.score_reasoning}")
+        if d.risk_flags:
+            logger.info(f"         风控: {flags}")
 
     # ── P6: 报告层（待实现）──────────────────────────────
     logger.warning("[P6] 报告层待实现")
@@ -98,7 +126,7 @@ def run() -> None:
         )
 
     logger.info(f"{'='*50}")
-    logger.info("P1 + P2 + P3 + P4 运行完毕 ✓")
+    logger.info("P1 + P2 + P3 + P4 + P5 运行完毕 ✓")
 
 
 def _score_bar(score: float, width: int = 10) -> str:
