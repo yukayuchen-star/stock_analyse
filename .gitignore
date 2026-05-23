@@ -58,6 +58,10 @@ models/
 *.ckpt
 *.joblib
 
+# Session exports & reference images (not source)
+*.txt
+images/
+
 # macOS
 .DS_Store
 .AppleDouble
