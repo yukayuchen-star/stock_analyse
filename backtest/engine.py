@@ -124,8 +124,8 @@ def _simulate_trades(df: pd.DataFrame, events: List[ChanEvent]) -> List[Trade]:
                     sl = e_price * (1 - _SL_PCT)
                     tp = e_price * (1 + _SL_PCT * _TP_MULT)
 
-            elif ev.signal_type.startswith("s"):
-                # 卖出信号 → 以当日收盘出场
+            elif ev.signal_type.startswith("s") and ev.date > e_date:
+                # F5: 卖出信号 → 以当日收盘出场（同日入场的卖信号忽略，避免 0-PnL 幽灵交易）
                 close_p = ev.price
                 trades.append(_make_trade(e_date, ev.date, e_sig,
                                           e_price, close_p, "signal"))
@@ -164,11 +164,13 @@ def _compute_metrics(trades: List[Trade], df: pd.DataFrame) -> dict:
     total_ret   = float(np.prod([1 + p for p in pnls]) - 1)
 
     # 简化 Sharpe：以笔均收益 / 标准差 × sqrt(252/均持有天数) 近似
-    # 胜率接近 100% 时方差趋零导致 Sharpe 爆炸，cap 至 5.0
+    # 方差趋零时 Sharpe 爆炸 → cap 至 5.0；方差严格为零且收益为正 → 同样给出 5.0
     avg_hold = float(np.mean([t.holding_days for t in trades]))
     if len(pnls) > 1 and np.std(pnls) > 1e-9:
         sharpe = (avg_pnl / np.std(pnls)) * np.sqrt(252 / max(avg_hold, 1))
         sharpe = min(sharpe, 5.0)
+    elif len(pnls) > 1 and avg_pnl > 0:
+        sharpe = 5.0   # F4: 零方差正收益，使用 cap 上限而非 0
     else:
         sharpe = 0.0
 

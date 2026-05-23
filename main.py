@@ -44,9 +44,13 @@ def _interactive_pool_editor(
     raw_add = input("添加股票代码（逗号分隔）: ").strip()
     if raw_add:
         for ticker in [t.strip().upper() for t in raw_add.split(",") if t.strip()]:
-            # 简单格式校验：只允许字母数字、点和连字符
-            clean = ticker.replace(".", "").replace("-", "").replace("^", "")
-            if not clean.isalnum():
+            # F2: 先拒绝以 ^ 开头的指数代码（不可直接买卖）
+            if ticker.startswith("^"):
+                print(f"  ✗ {ticker} 是指数代码，不可加入股票池")
+                continue
+            # 格式校验：去除合法分隔符后必须全为字母数字，且不能纯数字
+            clean = ticker.replace(".", "").replace("-", "")
+            if not clean.isalnum() or clean.isdigit():
                 print(f"  ✗ 格式无效，跳过: {ticker}")
                 continue
             if ticker in pool:
@@ -128,6 +132,15 @@ def run() -> None:
             result = compute_quant_signal(ticker, prices, bucket_tickers, info)
             quant_signals[ticker] = result
             logger.info(f"    {ticker:5s}: {result.reasoning}")
+
+    # F1: 兜底——stock_pool 中不在任何 bucket 的股票，以全池为同行组计算
+    for ticker in stock_pool:
+        if ticker not in quant_signals:
+            logger.warning(f"  [P2] {ticker} 不在任何 bucket，以全池为同行组计算")
+            info   = fundamentals.get(ticker, {})
+            result = compute_quant_signal(ticker, prices, stock_pool, info)
+            quant_signals[ticker] = result
+            logger.info(f"    {ticker:5s} [fallback]: {result.reasoning}")
 
     # ── P3: 宏观信号层 ───────────────────────────────────────
     logger.info("── P3 宏观信号层 ──")

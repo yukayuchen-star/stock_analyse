@@ -39,6 +39,8 @@ class DataPipeline:
     def get_all_prices(self, stock_pool: list[str] | None = None) -> dict[str, pd.DataFrame]:
         """获取全部股票 + 基准的日线数据。stock_pool 为 None 时使用配置默认值。"""
         pool = stock_pool if stock_pool is not None else STOCK_POOL
+        if not pool:
+            logger.warning("get_all_prices: stock_pool 为空，仅返回基准价格数据")
         result: dict[str, pd.DataFrame] = {}
         for ticker in pool + BENCHMARKS:
             df = self.get_price(ticker)
