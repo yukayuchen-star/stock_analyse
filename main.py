@@ -1,3 +1,5 @@
+import copy
+import sys
 from pathlib import Path
 from loguru import logger
 
@@ -15,21 +17,94 @@ from backtest.report             import write_backtest_report
 from utils.time_utils import today_str, prev_trading_day
 
 
+def _interactive_pool_editor(
+    pool: list[str],
+    buckets: dict[str, list[str]],
+) -> tuple[list[str], dict[str, list[str]]]:
+    """
+    交互式编辑股票池。非 TTY（cron/pipe）时直接跳过，使用默认配置。
+    返回 (最终pool, 最终buckets)。
+    """
+    if not sys.stdin.isatty():
+        return pool, buckets
+
+    pool    = list(pool)
+    buckets = copy.deepcopy(buckets)
+
+    sep = "=" * 52
+    print(f"\n{sep}")
+    print("  股票池编辑器（直接回车跳过任一步骤）")
+    print(sep)
+    print(f"当前股票池 ({len(pool)} 只): {', '.join(pool)}")
+    for bname, btickers in buckets.items():
+        print(f"  [{bname}]: {', '.join(btickers)}")
+    print()
+
+    # ── 添加 ────────────────────────────────────────────
+    raw_add = input("添加股票代码（逗号分隔）: ").strip()
+    if raw_add:
+        for ticker in [t.strip().upper() for t in raw_add.split(",") if t.strip()]:
+            # 简单格式校验：只允许字母数字、点和连字符
+            clean = ticker.replace(".", "").replace("-", "").replace("^", "")
+            if not clean.isalnum():
+                print(f"  ✗ 格式无效，跳过: {ticker}")
+                continue
+            if ticker in pool:
+                print(f"  ! {ticker} 已在池中")
+            else:
+                pool.append(ticker)
+                buckets.setdefault("custom", []).append(ticker)
+                print(f"  + 已添加 {ticker} → [custom]")
+
+    # ── 删除 ────────────────────────────────────────────
+    print(f"\n当前股票池 ({len(pool)} 只): {', '.join(pool)}")
+    raw_del = input("删除股票代码（逗号分隔）: ").strip()
+    if raw_del:
+        for ticker in [t.strip().upper() for t in raw_del.split(",") if t.strip()]:
+            if ticker in pool:
+                pool.remove(ticker)
+                for btickers in buckets.values():
+                    if ticker in btickers:
+                        btickers.remove(ticker)
+                print(f"  - 已删除 {ticker}")
+            else:
+                print(f"  ! {ticker} 不在池中，跳过")
+        # 移除因删除而空掉的 bucket
+        buckets = {k: v for k, v in buckets.items() if v}
+
+    # ── 确认 ────────────────────────────────────────────
+    if not pool:
+        print("股票池为空，退出。")
+        raise SystemExit(1)
+
+    print(f"\n最终股票池 ({len(pool)} 只): {', '.join(pool)}")
+    confirm = input("确认使用此股票池？[Y/n]: ").strip().lower()
+    if confirm in ("n", "no"):
+        print("已取消，退出。")
+        raise SystemExit(0)
+
+    print(f"{sep}\n")
+    return pool, buckets
+
+
 def run() -> None:
     date_str   = today_str()
     output_dir = Path(settings.output_dir) / date_str
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── 股票池编辑（交互式，非 TTY 时跳过）─────────────────
+    stock_pool, buckets = _interactive_pool_editor(list(STOCK_POOL), BUCKETS)
+
     logger.info(f"{'='*50}")
     logger.info(f"美股量化分析系统  {date_str}")
     logger.info(f"{'='*50}")
-    logger.info(f"股票池 ({len(STOCK_POOL)} 只): {STOCK_POOL}")
+    logger.info(f"股票池 ({len(stock_pool)} 只): {stock_pool}")
     logger.info(f"基准: {BENCHMARKS}")
     logger.info(f"数据基准日 (t-1): {prev_trading_day()}")
 
     # ── P1: 数据层 ────────────────────────────────────────
     pipeline = DataPipeline()
-    data = pipeline.fetch_all()
+    data = pipeline.fetch_all(stock_pool=stock_pool)
 
     prices       = data["prices"]
     snapshot     = data["snapshot"]
@@ -46,7 +121,7 @@ def run() -> None:
     logger.info("── P2 量化信号层 ──")
     quant_signals = {}
 
-    for bucket_name, bucket_tickers in BUCKETS.items():
+    for bucket_name, bucket_tickers in buckets.items():
         logger.info(f"  [{bucket_name}]")
         for ticker in bucket_tickers:
             info   = fundamentals.get(ticker, {})
@@ -56,7 +131,7 @@ def run() -> None:
 
     # ── P3: 宏观信号层 ───────────────────────────────────────
     logger.info("── P3 宏观信号层 ──")
-    macro = compute_macro_signal(snapshot, prices, BUCKETS)
+    macro = compute_macro_signal(snapshot, prices, buckets)
     logger.info(
         f"  VIX={macro.vix_level:.1f} [{macro.vix_regime}] "
         f"仓位上限={macro.position_limit:.0%}  "
@@ -71,7 +146,7 @@ def run() -> None:
     # ── P4: 缠论信号层 ───────────────────────────────────────
     logger.info("── P4 缠论信号层 ──")
     chan_signals = {}
-    for ticker in STOCK_POOL:
+    for ticker in stock_pool:
         result = compute_chan_signal(ticker, prices)
         chan_signals[ticker] = result
         point = result.buy_point_type or result.sell_point_type or "neutral"
@@ -85,7 +160,7 @@ def run() -> None:
     # ── P5: 决策层 ───────────────────────────────────────
     logger.info("── P5 决策层 ──")
     decisions: dict[str, StockDecision] = {}
-    for ticker in STOCK_POOL:
+    for ticker in stock_pool:
         d = make_decision(
             ticker=ticker,
             chan=chan_signals[ticker],
@@ -138,7 +213,7 @@ def run() -> None:
 
     # ── P7: 回测层 ───────────────────────────────────────
     logger.info("── P7 回测层（缠论信号 walk-forward）──")
-    bt_results = run_all_backtests(pipeline, STOCK_POOL)
+    bt_results = run_all_backtests(pipeline, stock_pool)
     bt_path    = write_backtest_report(bt_results, output_dir, date_str)
     for ticker, r in bt_results.items():
         logger.info(f"  {ticker:5s}: {r.reasoning}")

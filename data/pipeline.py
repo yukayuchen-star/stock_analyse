@@ -36,10 +36,11 @@ class DataPipeline:
         start = (date.today() - timedelta(days=settings.backtest_history_days)).strftime("%Y-%m-%d")
         return self.yf.get_price(ticker, start, end)
 
-    def get_all_prices(self) -> dict[str, pd.DataFrame]:
-        """获取全部股票 + 基准的日线数据。"""
+    def get_all_prices(self, stock_pool: list[str] | None = None) -> dict[str, pd.DataFrame]:
+        """获取全部股票 + 基准的日线数据。stock_pool 为 None 时使用配置默认值。"""
+        pool = stock_pool if stock_pool is not None else STOCK_POOL
         result: dict[str, pd.DataFrame] = {}
-        for ticker in STOCK_POOL + BENCHMARKS:
+        for ticker in pool + BENCHMARKS:
             df = self.get_price(ticker)
             if not df.empty:
                 result[ticker] = df
@@ -79,10 +80,11 @@ class DataPipeline:
 
     # ── 基本面 info ────────────────────────────────────────
 
-    def get_fundamentals(self) -> dict[str, dict]:
-        """yfinance info 关键财务指标，7 天缓存。"""
+    def get_fundamentals(self, stock_pool: list[str] | None = None) -> dict[str, dict]:
+        """yfinance info 关键财务指标，7 天缓存。stock_pool 为 None 时使用配置默认值。"""
+        pool = stock_pool if stock_pool is not None else STOCK_POOL
         result: dict[str, dict] = {}
-        for ticker in STOCK_POOL:
+        for ticker in pool:
             info = self.yf.get_info(ticker)
             if info:
                 result[ticker] = info
@@ -92,9 +94,10 @@ class DataPipeline:
 
     # ── 全量拉取（main.py 入口）──────────────────────────
 
-    def fetch_all(self) -> dict:
+    def fetch_all(self, stock_pool: list[str] | None = None) -> dict:
         """
-        P6 入口：一次性拉取全部数据，返回结构化字典供信号层消费。
+        P1 入口：一次性拉取全部数据，返回结构化字典供信号层消费。
+        stock_pool 为 None 时使用配置默认值 STOCK_POOL。
         {
             "prices":   dict[ticker, DataFrame],
             "news":     dict[ticker, DataFrame],
@@ -102,14 +105,15 @@ class DataPipeline:
             "snapshot": dict[series_id, float],
         }
         """
+        pool = stock_pool if stock_pool is not None else STOCK_POOL
         logger.info("── 数据层：开始拉取 ──")
 
-        logger.info(f"  价格数据 ({len(STOCK_POOL + BENCHMARKS)} 只)…")
-        prices = self.get_all_prices()
+        logger.info(f"  价格数据 ({len(pool + BENCHMARKS)} 只)…")
+        prices = self.get_all_prices(pool)
 
         logger.info("  新闻数据…")
         news = {}
-        for ticker in STOCK_POOL:
+        for ticker in pool:
             news[ticker] = self.get_news(ticker)
 
         logger.info("  宏观数据 (FRED)…")
@@ -117,7 +121,7 @@ class DataPipeline:
         snapshot = self.get_macro_snapshot()
 
         logger.info("  基本面数据 (yfinance info)…")
-        fundamentals = self.get_fundamentals()
+        fundamentals = self.get_fundamentals(pool)
 
         logger.info(f"── 数据层完成：{len(prices)} 只价格 / {len(macro)} 个宏观序列 / {len(fundamentals)} 只基本面 ──")
         return {"prices": prices, "news": news, "macro": macro, "snapshot": snapshot, "fundamentals": fundamentals}
