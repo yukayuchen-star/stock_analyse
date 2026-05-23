@@ -10,6 +10,8 @@ from signals.macro.macro_signal  import compute_macro_signal
 from signals.chan.chan_signal     import compute_chan_signal
 from decision.strategy           import make_decision, StockDecision
 from report.report_writer        import write_all_reports
+from backtest.engine             import run_all_backtests
+from backtest.report             import write_backtest_report
 from utils.time_utils import today_str, prev_trading_day
 
 
@@ -134,8 +136,16 @@ def run() -> None:
             f"vol={r.volume_score:+.2f}"
         )
 
+    # ── P7: 回测层 ───────────────────────────────────────
+    logger.info("── P7 回测层（缠论信号 walk-forward）──")
+    bt_results = run_all_backtests(pipeline, STOCK_POOL)
+    bt_path    = write_backtest_report(bt_results, output_dir, date_str)
+    for ticker, r in bt_results.items():
+        logger.info(f"  {ticker:5s}: {r.reasoning}")
+    logger.info(f"  回测报告: {bt_path}")
+
     logger.info(f"{'='*50}")
-    logger.info("P1 + P2 + P3 + P4 + P5 + P6 运行完毕 ✓")
+    logger.info("P1 + P2 + P3 + P4 + P5 + P6 + P7 运行完毕 ✓")
     logger.info(f"报告目录: {output_dir}")
 
 

@@ -30,6 +30,12 @@ class DataPipeline:
         start = (date.today() - timedelta(days=settings.price_history_days)).strftime("%Y-%m-%d")
         return self.yf.get_price(ticker, start, end)
 
+    def get_backtest_price(self, ticker: str) -> pd.DataFrame:
+        """获取 backtest_history_days 窗口的价格（P7 回测专用）。"""
+        end   = today_str()
+        start = (date.today() - timedelta(days=settings.backtest_history_days)).strftime("%Y-%m-%d")
+        return self.yf.get_price(ticker, start, end)
+
     def get_all_prices(self) -> dict[str, pd.DataFrame]:
         """获取全部股票 + 基准的日线数据。"""
         result: dict[str, pd.DataFrame] = {}

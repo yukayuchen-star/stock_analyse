@@ -15,7 +15,7 @@
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -60,6 +60,62 @@ class ChanSignalResult:
     score:      float = 0.0
     confidence: float = 0.0
     reasoning:  str   = ""
+
+
+# ── P7 回测用：历史信号事件提取 ──────────────────────────────
+
+@dataclass
+class ChanEvent:
+    """单个缠论买/卖信号事件（回测专用，无前视偏差）。"""
+    date:        pd.Timestamp
+    signal_type: str    # "b1"|"b2"|"b3"|"s1"|"s2"|"s3"
+    price:       float
+    score:       float
+
+
+def extract_chan_events(df: pd.DataFrame) -> List[ChanEvent]:
+    """
+    对完整历史 DataFrame 进行一次笔结构分析，
+    在每根笔完成时（仅用截至该日的数据）提取信号事件。
+
+    无前视偏差：信号在笔结束日触发，仅依赖该日及之前数据。
+    用于 P7 回测引擎，返回按日期升序排列的事件列表。
+    """
+    if len(df) < 60:
+        return []
+    try:
+        pbars    = process_bars(df)
+        fractals = detect_fractals(pbars)
+        strokes  = build_strokes(fractals)
+    except Exception:
+        return []
+
+    events: List[ChanEvent] = []
+    for i in range(3, len(strokes)):
+        stroke      = strokes[i]
+        sub_strokes = strokes[: i + 1]
+        sub_df      = df[df.index <= stroke.end_date]
+        if len(sub_df) < 30:
+            continue
+
+        sub_close = sub_df["Close"]
+        sub_hist  = _macd_hist(sub_close)
+        pivot     = find_latest_pivot(sub_strokes, lookback=12)
+
+        buy_type, raw_score, _ = _detect_buy(
+            sub_strokes, pivot, sub_hist, sub_df, sub_close)
+        if buy_type != "none":
+            events.append(ChanEvent(stroke.end_date, buy_type,
+                                    float(sub_close.iloc[-1]), raw_score))
+            continue
+
+        sell_type, raw_score, _ = _detect_sell(
+            sub_strokes, pivot, sub_hist, sub_df, sub_close)
+        if sell_type != "none":
+            events.append(ChanEvent(stroke.end_date, sell_type,
+                                    float(sub_close.iloc[-1]), raw_score))
+
+    return events
 
 
 def placeholder_chan_signal(ticker: str) -> ChanSignalResult:
