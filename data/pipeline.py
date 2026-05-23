@@ -71,6 +71,19 @@ class DataPipeline:
     def get_earnings(self, ticker: str) -> pd.DataFrame:
         return self.av.get_income_quarterly(ticker)
 
+    # ── 基本面 info ────────────────────────────────────────
+
+    def get_fundamentals(self) -> dict[str, dict]:
+        """yfinance info 关键财务指标，7 天缓存。"""
+        result: dict[str, dict] = {}
+        for ticker in STOCK_POOL:
+            info = self.yf.get_info(ticker)
+            if info:
+                result[ticker] = info
+            else:
+                logger.warning(f"No fundamental info: {ticker}")
+        return result
+
     # ── 全量拉取（main.py 入口）──────────────────────────
 
     def fetch_all(self) -> dict:
@@ -97,5 +110,8 @@ class DataPipeline:
         macro    = self.get_macro()
         snapshot = self.get_macro_snapshot()
 
-        logger.info(f"── 数据层完成：{len(prices)} 只价格 / {len(macro)} 个宏观序列 ──")
-        return {"prices": prices, "news": news, "macro": macro, "snapshot": snapshot}
+        logger.info("  基本面数据 (yfinance info)…")
+        fundamentals = self.get_fundamentals()
+
+        logger.info(f"── 数据层完成：{len(prices)} 只价格 / {len(macro)} 个宏观序列 / {len(fundamentals)} 只基本面 ──")
+        return {"prices": prices, "news": news, "macro": macro, "snapshot": snapshot, "fundamentals": fundamentals}

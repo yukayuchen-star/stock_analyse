@@ -80,6 +80,39 @@ class YFinanceSource:
             self.cache.set(key, df, ttl_hours=self.TTL_NEWS)
         return df
 
+    # ── 基本面 info ────────────────────────────────────────
+
+    # 仅缓存这些数值型字段，避免 JSON 序列化复杂类型
+    _INFO_FIELDS = [
+        "revenueGrowth", "earningsGrowth", "earningsQuarterlyGrowth",
+        "returnOnEquity", "grossMargins", "operatingMargins",
+        "debtToEquity", "pegRatio", "trailingPegRatio",
+        "freeCashflow", "marketCap", "trailingPE", "forwardPE",
+        "trailingEps", "forwardEps",
+    ]
+    TTL_INFO = 24 * 7   # 基本面数据缓存 7 天
+
+    def get_info(self, ticker: str) -> dict:
+        """获取 yfinance Ticker.info 中的关键财务指标（7 天缓存）。"""
+        key = self.cache.make_key("yf_info", ticker)
+        cached = self.cache.get(key)
+        if cached is not None:
+            logger.debug(f"Cache hit: info {ticker}")
+            return cached.iloc[0].to_dict()
+
+        try:
+            raw = yf.Ticker(ticker).info or {}
+            filtered = {k: raw[k] for k in self._INFO_FIELDS if k in raw and raw[k] is not None}
+            if not filtered:
+                return {}
+            df = pd.DataFrame([filtered])
+            self.cache.set(key, df, ttl_hours=self.TTL_INFO)
+            logger.debug(f"Fetched info: {ticker} ({len(filtered)} fields)")
+            return filtered
+        except Exception as e:
+            logger.warning(f"yfinance info error [{ticker}]: {e}")
+            return {}
+
     # ── 宏观（不支持）────────────────────────────────────
 
     def get_macro(self, series_id: str) -> pd.DataFrame:

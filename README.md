@@ -56,23 +56,29 @@ final_score = 0.40 × chan_score + 0.40 × quant_score + 0.20 × macro_score
 
 ### 量化得分（quant_score）
 
-量化因子分为四组，横截面评分后合成：
+量化因子分五组，对应 quant.md 五层架构（先用基本面找赢家，趋势确认方向，动量找买点，缠论精细择时）：
 
-| 子因子组 | 权重 | 具体指标 | 计算方向 |
-|---------|------|---------|---------|
-| **趋势因子** | 35% | SMA20/60/200 多空排列；ADX14 趋势强度；EMA 偏离度 | 价格站上均线系统为正 |
-| **动量因子** | 35% | ROC20（20日变化率）；MACD 柱（DIF-DEA）；RSI14 区间位置；KAMA 方向 | 上行动量为正 |
-| **相对强度** | 20% | 个股相对 QQQ 20 日超额收益；桶内动量 Z-score 排名 | 跑赢 QQQ 为正 |
-| **量价因子** | 10% | OBV 趋势（量能是否配合涨）；VWMA 偏离（价格相对成交量加权均价） | 量价齐升为正 |
+| 子因子组 | 权重 | 具体指标 | 对应层 |
+|---------|------|---------|-------|
+| **基本面** | 15% | Revenue/EPS Growth, ROE, Gross Margin, D/E, PEG | Layer1 长期筛选 |
+| **趋势因子** | 25% | SMA20/60/200 位置排列；ADX14；EMA20 斜率 | Layer2 方向确认 |
+| **动量因子** | 30% | ROC20；MACD 柱；RSI14；KAMA；Pullback/Breakout 信号 | Layer3 买点（缠论前置接口）|
+| **相对强度** | 20% | vs QQQ/SPY 超额收益；桶内横截面 Z-score | 横截面选股 |
+| **量价因子** | 10% | OBV 趋势；VWMA20 偏离 | 量价确认 |
 
 ```python
 quant_score = (
-    0.35 × trend_score
-  + 0.35 × momentum_score
+    0.15 × fundamental_score
+  + 0.25 × trend_score
+  + 0.30 × momentum_score       # 动量层内置 Pullback/Breakout，是缠论买点的量化前置
   + 0.20 × relative_strength_score
   + 0.10 × volume_score
 )
 ```
+
+> **Pullback/Breakout 信号**（momentum 内置）：
+> - 回调买入：上升趋势中价格接触 EMA20（±3%） → 附加 +0.30（对应缠论二买/三买入场区）
+> - 突破信号：价格在 52W 高点 3% 以内 → 附加 +0.20（趋势延续买点）
 
 ### 宏观得分（macro_score）
 
@@ -200,7 +206,7 @@ stock_analyse/
 |-------|------|------|
 | P0 | 骨架 + config + logger | ✅ 完成 |
 | P1 | 数据层 4 源 + SQLite | ✅ 完成 |
-| P2 | 量化信号层（trend/momentum/relative/volume） | 进行中 |
+| P2 | 量化信号层（fundamental/trend/momentum/relative/volume） | ✅ 完成 |
 | P3 | 宏观信号层（VIX制度 + 桶强度） | 待开始 |
 | P4 | **缠论信号层**（等用户提供精髓） | 阻塞中 |
 | P5 | 决策层（双引擎打分 + 风控） | 待开始 |
