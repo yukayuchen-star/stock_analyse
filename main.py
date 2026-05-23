@@ -9,6 +9,7 @@ from signals.quant.factor_engine import compute_quant_signal
 from signals.macro.macro_signal  import compute_macro_signal
 from signals.chan.chan_signal     import compute_chan_signal
 from decision.strategy           import make_decision, StockDecision
+from report.report_writer        import write_all_reports
 from utils.time_utils import today_str, prev_trading_day
 
 
@@ -109,8 +110,16 @@ def run() -> None:
         if d.risk_flags:
             logger.info(f"         风控: {flags}")
 
-    # ── P6: 报告层（待实现）──────────────────────────────
-    logger.warning("[P6] 报告层待实现")
+    # ── P6: 报告层 ───────────────────────────────────────
+    logger.info("── P6 报告层 ──")
+    written = write_all_reports(
+        decisions=decisions,
+        macro=macro,
+        date_str=date_str,
+        output_dir=output_dir,
+    )
+    for p in written:
+        logger.info(f"  已写入: {p}")
 
     # ── 量化评分排行 ─────────────────────────────────────
     logger.info("── 量化评分排行（按 score 降序）──")
@@ -126,7 +135,8 @@ def run() -> None:
         )
 
     logger.info(f"{'='*50}")
-    logger.info("P1 + P2 + P3 + P4 + P5 运行完毕 ✓")
+    logger.info("P1 + P2 + P3 + P4 + P5 + P6 运行完毕 ✓")
+    logger.info(f"报告目录: {output_dir}")
 
 
 def _score_bar(score: float, width: int = 10) -> str:
