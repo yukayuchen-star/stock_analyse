@@ -51,6 +51,12 @@ logs/
 reports/
 results/
 
+# graphify knowledge graph
+graphify-out/
+
+# Pool change history (runtime, not source)
+pool_history.jsonl
+
 # ML models
 models/
 *.pt
@@ -77,3 +83,4 @@ images/
 .pytest_cache/
 .coverage
 htmlcov/
+.claude/settings.json

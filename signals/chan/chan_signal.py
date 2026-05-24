@@ -21,9 +21,9 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from signals.chan.fractal import process_bars, detect_fractals
+from signals.chan.fractal import process_bars, detect_fractals, PBar
 from signals.chan.stroke  import build_strokes, Stroke
-from signals.chan.pivot   import find_latest_pivot, Pivot
+from signals.chan.pivot   import find_latest_pivot, build_all_pivots, Pivot
 
 
 # ── 结果数据类 ────────────────────────────────────────────────
@@ -55,6 +55,15 @@ class ChanSignalResult:
     last_stroke_direction: str = "unknown"  # "up"|"down"
     weekly_trend:          str = "neutral"  # "up"|"down"|"neutral"
     level_resonance:       int = 0          # 0-2（日线+周线共振数）
+
+    # 结构性质（缠论：中枢数 ≥2 为趋势，=1 为盘整）
+    trend_type:    str = "none"             # "trend"|"consolidation"|"none"
+    pivot_total:   int = 0                  # 最近窗口内中枢总数
+    fractal_stop:  bool = False             # 末笔分型是否完成停顿确认
+
+    # 实战参数（仅在有买/卖信号时填充）
+    stop_loss: Optional[float] = None       # 止损价
+    r_ratio:   Optional[float] = None       # (entry - stop) / entry，正数
 
     # 综合
     score:      float = 0.0
@@ -91,28 +100,56 @@ def extract_chan_events(df: pd.DataFrame) -> List[ChanEvent]:
         return []
 
     events: List[ChanEvent] = []
+    STOP_WAIT = 5  # 分型形成后最多等 5 个交易日做停顿确认
     for i in range(3, len(strokes)):
         stroke      = strokes[i]
         sub_strokes = strokes[: i + 1]
-        sub_df      = df[df.index <= stroke.end_date]
+
+        # 找停顿确认日：分型第三根 PBar 之后第一根 close 站住的 raw bar
+        end_f      = stroke.end
+        idx_third  = end_f.pbar_idx + 1
+        if idx_third >= len(pbars):
+            continue
+        third_date = pbars[idx_third].date
+        third_hi   = pbars[idx_third].high
+        third_lo   = pbars[idx_third].low
+
+        after = df[(df.index > third_date)].head(STOP_WAIT)
+        if after.empty:
+            continue
+        if end_f.kind == "bottom":
+            mask = after["Close"] >= third_hi
+        elif end_f.kind == "top":
+            mask = after["Close"] <= third_lo
+        else:
+            continue
+        if not mask.any():
+            continue
+        stop_date = after.index[mask.argmax()]
+
+        sub_df    = df[df.index <= stop_date]
         if len(sub_df) < 30:
             continue
-
         sub_close = sub_df["Close"]
         sub_hist  = _macd_hist(sub_close)
         pivot     = find_latest_pivot(sub_strokes, lookback=12)
+        trend     = _classify_trend(build_all_pivots(sub_strokes[-30:]))
 
         buy_type, raw_score, _ = _detect_buy(
             sub_strokes, pivot, sub_hist, sub_df, sub_close)
         if buy_type != "none":
-            events.append(ChanEvent(stroke.end_date, buy_type,
+            if buy_type == "b1":
+                raw_score *= _trend_weight(trend)
+            events.append(ChanEvent(stop_date, buy_type,
                                     float(sub_close.iloc[-1]), raw_score))
             continue
 
         sell_type, raw_score, _ = _detect_sell(
             sub_strokes, pivot, sub_hist, sub_df, sub_close)
         if sell_type != "none":
-            events.append(ChanEvent(stroke.end_date, sell_type,
+            if sell_type == "s1":
+                raw_score *= _trend_weight(trend)
+            events.append(ChanEvent(stop_date, sell_type,
                                     float(sub_close.iloc[-1]), raw_score))
 
     return events
@@ -141,6 +178,78 @@ def _stroke_area(stroke: Stroke, df: pd.DataFrame, hist: pd.Series) -> float:
     """笔内 MACD 柱绝对值之和（背驰对比用）。"""
     mask = (df.index >= stroke.start_date) & (df.index <= stroke.end_date)
     return float(hist[mask].abs().sum())
+
+
+# ── 分型停顿法（缠论原文第四章）─────────────────────────────
+# 底分型停顿：底分型后再有一根 K 线，收盘价站住"第三根 K 线"的高点
+# 顶分型停顿：顶分型后再有一根 K 线，收盘价跌破"第三根 K 线"的低点
+def _fractal_stopped(
+    last_stroke: Stroke,
+    pbars: List[PBar],
+    df: pd.DataFrame,
+) -> bool:
+    end_fractal = last_stroke.end
+    idx_third   = end_fractal.pbar_idx + 1   # 分型的第三根处理K线
+    if idx_third >= len(pbars):
+        return False
+    third_pb = pbars[idx_third]
+
+    # 第三根 PBar 之后的所有原始 K 线：任意一根收盘站住即视为停顿确认
+    # 笔结构本身保证未创新低/新高（否则末笔会重画），故只需检查站位
+    after_close = df.loc[df.index > third_pb.date, "Close"]
+    if after_close.empty:
+        return False
+
+    if end_fractal.kind == "bottom":
+        return bool((after_close >= third_pb.high).any())
+    if end_fractal.kind == "top":
+        return bool((after_close <= third_pb.low).any())
+    return False
+
+
+# ── 走势类型分类（缠论原文："中枢数≥2 为趋势，=1 为盘整"）──
+def _classify_trend(pivots: List[Pivot]) -> str:
+    n = len(pivots)
+    if n >= 2:
+        return "trend"
+    if n == 1:
+        return "consolidation"
+    return "none"
+
+
+def _trend_weight(trend_type: str) -> float:
+    """趋势背驰更可靠 ×1.15，盘整背驰弱 ×0.85，仅作用于 1 类买卖点。"""
+    if trend_type == "trend":
+        return 1.15
+    if trend_type == "consolidation":
+        return 0.85
+    return 1.0
+
+
+# ── 止损价 + R 比率（缠论原文"R=（买入价-止损价）/买入价"）──
+_STOP_BUFFER = 0.01  # 1% 缓冲，防止贴边假突破触发
+
+def _calc_stop_and_r(
+    point_type: str,
+    entry: float,
+    last_stroke: Stroke,
+    pivot: Optional[Pivot],
+) -> tuple[Optional[float], Optional[float]]:
+    stop: Optional[float] = None
+    if point_type == "b1" or point_type == "b2":
+        stop = last_stroke.low * (1 - _STOP_BUFFER)
+    elif point_type == "b3" and pivot is not None:
+        stop = pivot.zg * (1 - _STOP_BUFFER)
+    elif point_type == "s1" or point_type == "s2":
+        stop = last_stroke.high * (1 + _STOP_BUFFER)
+    elif point_type == "s3" and pivot is not None:
+        stop = pivot.zd * (1 + _STOP_BUFFER)
+
+    if stop is None or entry <= 0:
+        return None, None
+    # 买点 r = (entry - stop) / entry > 0；卖点 r = (stop - entry) / entry > 0
+    r = abs(entry - stop) / entry
+    return round(stop, 4), round(r, 4)
 
 
 # ── 周线过滤 ──────────────────────────────────────────────────
@@ -284,8 +393,10 @@ def compute_chan_signal(
                 reasoning=f"笔不足({len(strokes)}根，需>=3) 分型={len(fractals)}",
             )
 
-        # ── 4. 中枢 ───────────────────────────────────────────
+        # ── 4. 中枢（最近 + 全部）─────────────────────────────
         latest_pivot = find_latest_pivot(strokes, lookback=12)
+        all_pivots   = build_all_pivots(strokes[-30:])  # 走势类型只看近 30 笔
+        trend_type   = _classify_trend(all_pivots)
 
         # ── 5. MACD & 周线 ────────────────────────────────────
         close   = df["Close"]
@@ -297,19 +408,25 @@ def compute_chan_signal(
         cutoff   = df.index[-1] - pd.Timedelta(days=15)
         is_fresh = last.end_date >= cutoff
 
+        # 分型停顿确认（缠论第四章核心过滤）
+        fractal_stop = _fractal_stopped(last, pbars, df) if is_fresh else False
+
         buy_type  = sell_type = "none"
         raw_score = 0.0
         diverge   = False
 
-        if is_fresh:
+        if is_fresh and fractal_stop:
             buy_type, raw_score, diverge = _detect_buy(
                 strokes, latest_pivot, hist, df, close)
             if buy_type == "none":
                 sell_type, raw_score, diverge = _detect_sell(
                     strokes, latest_pivot, hist, df, close)
 
-        # ── 7. 周线过滤 & 共振 ────────────────────────────────
+        # ── 7. 趋势/盘整修正（仅作用于 1 类背驰）& 周线 & 共振 ──
         score = raw_score
+        if buy_type == "b1" or sell_type == "s1":
+            score *= _trend_weight(trend_type)
+
         if weekly == "down" and score > 0:
             score *= 0.5
 
@@ -322,16 +439,23 @@ def compute_chan_signal(
         score      = float(np.clip(score, -1.0, 1.0))
         confidence = min(len(strokes) / 20.0, 1.0)
 
-        # ── 8. 描述 ───────────────────────────────────────────
+        # ── 8. 止损 + R 比率 ──────────────────────────────────
+        active_pt = buy_type if buy_type != "none" else sell_type
+        stop_loss, r_ratio = (None, None)
+        if active_pt != "none":
+            stop_loss, r_ratio = _calc_stop_and_r(
+                active_pt, float(close.iloc[-1]), last, latest_pivot)
+
+        # ── 9. 描述 ───────────────────────────────────────────
         pstr  = (f"ZD={latest_pivot.zd:.1f} ZG={latest_pivot.zg:.1f}"
                  if latest_pivot else "无中枢")
-        point = (buy_type if buy_type != "none"
-                 else sell_type if sell_type != "none"
-                 else "neutral")
+        point = active_pt if active_pt != "none" else "neutral"
+        rstr  = f" stop={stop_loss} R={r_ratio:.3f}" if r_ratio else ""
         reasoning = (
-            f"笔={len(strokes)} {pstr} 周线={weekly} "
-            f"末笔={last.direction}{'✓' if is_fresh else '×'} "
-            f"→ {point} div={diverge} res={resonance} score={score:+.2f}"
+            f"笔={len(strokes)} {pstr} 周线={weekly} {trend_type} "
+            f"末笔={last.direction}{'✓' if is_fresh else '×'}"
+            f"{'停顿✓' if fractal_stop else '停顿×'} "
+            f"→ {point} div={diverge} res={resonance} score={score:+.2f}{rstr}"
         )
         logger.debug(f"[Chan] {ticker}: {reasoning}")
 
@@ -352,6 +476,11 @@ def compute_chan_signal(
             last_stroke_direction=last.direction,
             weekly_trend=weekly,
             level_resonance=resonance,
+            trend_type=trend_type,
+            pivot_total=len(all_pivots),
+            fractal_stop=fractal_stop,
+            stop_loss=stop_loss,
+            r_ratio=r_ratio,
             score=score,
             confidence=confidence,
             reasoning=reasoning,

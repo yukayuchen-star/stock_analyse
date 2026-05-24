@@ -71,3 +71,17 @@ class SQLiteCache:
     def invalidate(self, key: str) -> None:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM cache WHERE key = ?", (key,))
+
+    def purge_expired(self) -> int:
+        """删除已过期的缓存行并 VACUUM 回收磁盘空间，返回删除条数。"""
+        now_iso = datetime.now().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                "DELETE FROM cache "
+                "WHERE datetime(cached_at, '+' || ttl_hours || ' hours') < ?",
+                (now_iso,),
+            )
+            deleted = cur.rowcount
+            conn.commit()
+            conn.execute("VACUUM")
+        return deleted

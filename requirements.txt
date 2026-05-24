@@ -10,6 +10,8 @@ yfinance>=0.2.40
 alpha_vantage>=2.3
 finnhub-python>=2.4
 fredapi>=0.5
+requests>=2.31     # universe Wikipedia 抓取
+lxml>=5.0          # pandas.read_html 后端
 
 # P2/P3 — 信号层
 pandas-ta>=0.3.14b

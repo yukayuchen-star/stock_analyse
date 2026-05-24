@@ -16,7 +16,7 @@ def compute_relative_strength_score(
 
     子分项：
       vs QQQ   50%  — 个股 20 日超额收益 vs QQQ（科技股基准）
-      桶内排名  35%  — 同桶横截面 Z-score（Qlib 式横截面选股）
+      桶内排名  35%  — 同桶 20d 收益百分位（Qlib RankIC 思路，抗异常值优于 Z-score）
       vs SPY   15%  — 个股 20 日超额收益 vs SPY（大市基准）
 
     桶内只有 1 只股票时桶排名自动归零。
@@ -45,24 +45,22 @@ def compute_relative_strength_score(
         excess_spy = stock_ret - spy_ret
         vs_spy = float(np.clip(excess_spy / 0.06, -1, 1))
 
-    # ── 桶内横截面 Z-score ────────────────────────────────
+    # ── 桶内横截面百分位 Rank ────────────────────────────
     bucket_score = 0.0
+    bucket_pct   = 0.5
     peers = [
         t for t in bucket_tickers
         if t in prices and not prices[t].empty
         and len(prices[t]["Close"].dropna()) >= lookback + 1
     ]
-    if len(peers) >= 2:
-        peer_rets = np.array([
+    if len(peers) >= 2 and ticker in peers:
+        peer_rets = pd.Series([
             float(prices[t]["Close"].dropna().iloc[-1] / prices[t]["Close"].dropna().iloc[-lookback] - 1)
             for t in peers
-        ])
-        std = peer_rets.std()
-        if std > 0:
-            idx = peers.index(ticker) if ticker in peers else -1
-            if idx >= 0:
-                z = (peer_rets[idx] - peer_rets.mean()) / std
-                bucket_score = float(np.clip(z / 1.5, -1, 1))  # Z±1.5 → ±1
+        ], index=peers)
+        # 百分位 [0,1] → 映射到 [-1,+1]，无需依赖标准差，抗异常值
+        bucket_pct   = float(peer_rets.rank(pct=True).loc[ticker])
+        bucket_score = float(np.clip(2.0 * bucket_pct - 1.0, -1, 1))
 
     # ── 合成 ─────────────────────────────────────────────
     score = 0.50 * vs_qqq + 0.35 * bucket_score + 0.15 * vs_spy
@@ -71,7 +69,7 @@ def compute_relative_strength_score(
         f"ret_{lookback}d": stock_ret,
         "vs_qqq_excess":    stock_ret - (qqq_ret or 0),
         "vs_spy_excess":    stock_ret - (spy_ret or 0),
-        "bucket_z":         bucket_score * 1.5,
+        "bucket_pct":       bucket_pct,
     }
 
     return float(np.clip(score, -1, 1)), indicators

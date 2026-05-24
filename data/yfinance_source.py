@@ -85,10 +85,12 @@ class YFinanceSource:
     # 仅缓存这些数值型字段，避免 JSON 序列化复杂类型
     _INFO_FIELDS = [
         "revenueGrowth", "earningsGrowth", "earningsQuarterlyGrowth",
-        "returnOnEquity", "grossMargins", "operatingMargins",
+        "returnOnEquity", "returnOnAssets", "grossMargins", "operatingMargins",
         "debtToEquity", "pegRatio", "trailingPegRatio",
-        "freeCashflow", "marketCap", "trailingPE", "forwardPE",
+        "freeCashflow", "operatingCashflow", "totalRevenue", "currentRatio",
+        "marketCap", "trailingPE", "forwardPE",
         "trailingEps", "forwardEps",
+        "averageVolume", "averageVolume10days",  # 流动性预过滤
     ]
     TTL_INFO = 24 * 7   # 基本面数据缓存 7 天
 

@@ -27,10 +27,10 @@ class QuantSignalResult:
     量化选股引擎输出：系统化多因子横截面评分。
 
     五组子因子（权重）：
-      基本面   15%  — Revenue/EPS Growth, ROE, Gross Margin, D/E, PEG
+      基本面   15%  — Revenue/EPS Growth, ROE, Gross Margin, D/E, PEG, Quality(Piotroski 简化)
       趋势因子 25%  — SMA/EMA 位置排列 + ADX
       动量因子 30%  — ROC20/MACD/RSI14/KAMA + Pullback/Breakout 信号
-      相对强度 20%  — vs QQQ/SPY + 桶内横截面 Z-score
+      相对强度 20%  — vs QQQ/SPY + 桶内横截面百分位 Rank（Qlib RankIC 思路）
       量价因子 10%  — OBV 趋势 + VWMA 偏离
     """
 
