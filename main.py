@@ -22,6 +22,9 @@ from decision.strategy           import make_decision, StockDecision
 from report.report_writer        import write_all_reports
 from backtest.engine             import run_all_backtests
 from backtest.report             import write_backtest_report
+from backtest.forward_tracker    import (
+    log_signals, evaluate_pending, write_forward_report,
+)
 from utils.time_utils   import today_str, prev_trading_day
 from utils.housekeeping import cleanup_old_files
 
@@ -233,6 +236,13 @@ def run() -> None:
 
     # ── universe 扫描 → add 候选 ──────────────────────────
     pipeline = DataPipeline()
+
+    # ── 前向验证：评估 5 TD 前的信号 ─────────────────────────
+    logger.info("── 前向信号验证（评估已到期信号）──")
+    n_eval = evaluate_pending(pipeline)
+    if not n_eval:
+        logger.info("  [ForwardTracker] 暂无到期待评估信号")
+
     logger.info("── universe 扫描（add 候选）──")
     universe   = get_universe(nasdaq_top=30)
     add_cands  = screen_for_adds(
@@ -348,6 +358,9 @@ def run() -> None:
         if d.risk_flags:
             logger.info(f"         风控: {flags}")
 
+    # ── 前向验证：记录今日买入信号 ───────────────────────────
+    log_signals(decisions=decisions, buckets=buckets, date_str=date_str)
+
     # ── P6 报告 ──────────────────────────────────────────
     logger.info("── P6 报告层 ──")
     written = write_all_reports(
@@ -379,6 +392,11 @@ def run() -> None:
         logger.info(f"  {ticker:5s}: {r.reasoning}")
     logger.info(f"  回测报告: {bt_path}")
 
+    # ── P8 前向验证报告 ───────────────────────────────────
+    logger.info("── P8 前向信号验证报告 ──")
+    fv_path = write_forward_report(date_str, output_dir)
+    logger.info(f"  前向验证报告: {fv_path}")
+
     # ── 落盘：池快照 + 变更日志 ──────────────────────────
     save_pool_snapshot(
         date_str=date_str,
@@ -393,7 +411,7 @@ def run() -> None:
     append_pool_changes(changes)
 
     logger.info(f"{'='*50}")
-    logger.info("P1 + P2 + P3 + P4 + P5 + P6 + P7 运行完毕 ✓")
+    logger.info("P1 + P2 + P3 + P4 + P5 + P6 + P7 + P8 运行完毕 ✓")
     logger.info(f"报告目录: {output_dir}")
 
 

@@ -84,3 +84,4 @@ images/
 .coverage
 htmlcov/
 .claude/settings.json
+CLAUDE.md
