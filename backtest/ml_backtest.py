@@ -687,12 +687,22 @@ def _interpretation(result: WalkForwardResult, rule_wr: float, rule_ret: float) 
     else:
         lines.append(f"- **AUC={auc:.3f}** 接近随机，当前特征在该时间维度预测力不足。")
 
+    gap = rule_wr - ml_wr
     if ml_wr > rule_wr + 0.05:
-        lines.append(f"- ML 策略胜率（{ml_wr:.1%}）显著高于规则策略（{rule_wr:.1%}），ML 过滤有价值。")
+        lines.append(f"- ML 策略胜率（{ml_wr:.1%}）显著高于规则策略（{rule_wr:.1%}），ML 过滤有附加价值。")
     elif ml_wr > rule_wr:
         lines.append(f"- ML 策略胜率（{ml_wr:.1%}）略高于规则策略（{rule_wr:.1%}）。")
+    elif gap > 0.10:
+        lines.append(
+            f"- ⚠️ 缠论规则策略（{rule_wr:.1%}）远优于 ML（{ml_wr:.1%}，差 {gap:.1%}）。"
+            f" 原因：规则信号极度稀少（高精度小样本），ML 以全量样本为分母导致被稀释。"
+            f" 建议将缠论买点作为 ML 的**前置过滤条件**，而非竞争关系。"
+        )
     else:
-        lines.append(f"- 规则策略（{rule_wr:.1%}）与 ML（{ml_wr:.1%}）相当，规则已充分利用特征信息。")
+        lines.append(
+            f"- 缠论规则策略（{rule_wr:.1%}）优于 ML（{ml_wr:.1%}），"
+            f"规则信号的稀少性本身就是质量保证。"
+        )
 
     if result.overall_avg_ret > result.baseline_avg_ret:
         lift = result.overall_avg_ret - result.baseline_avg_ret
