@@ -68,7 +68,7 @@ class ExternalFactorsResult:
 
     # 通胀预期（10Y 盈亏平衡利率）
     breakeven_10y:   float = 0.0
-    breakeven_trend: float = 0.0   # 20日变化（pp）
+    breakeven_trend: float = 0.0   # 相对长期目标(2.5%)的偏离（pp，正=高于目标）；非真实20d趋势
     inflation_signal: float = 0.0  # -1~1，通胀预期↑→负
 
     # 异动检测
@@ -89,9 +89,11 @@ def _zscore_latest(series: pd.Series, window: int = _HIST) -> float:
         return 0.0
     hist = series.iloc[-window:]
     mu, sigma = hist.mean(), hist.std()
-    if sigma < 1e-9:
+    # NaN 防御：序列含 NaN 时 std/mean 可能为 NaN，NaN<1e-9 为 False 会漏过
+    if not np.isfinite(mu) or not np.isfinite(sigma) or sigma < 1e-9:
         return 0.0
-    return float((series.iloc[-1] - mu) / sigma)
+    z = (series.iloc[-1] - mu) / sigma
+    return float(z) if np.isfinite(z) else 0.0
 
 
 def _fetch_price_series(ticker: str, period: str = "2y") -> pd.Series:
@@ -101,7 +103,9 @@ def _fetch_price_series(ticker: str, period: str = "2y") -> pd.Series:
         if df.empty:
             return pd.Series(dtype=float)
         close = df["Close"]
-        return close.squeeze() if isinstance(close, pd.DataFrame) else close
+        # 仅沿列方向 squeeze：DataFrame.squeeze() 在单行时会塌成标量，
+        # 破坏后续 len()/iloc。squeeze(axis=1) 保证始终返回 Series。
+        return close.squeeze(axis=1) if isinstance(close, pd.DataFrame) else close
     except Exception as exc:
         logger.warning(f"[ExtMacro] {ticker} 下载失败: {exc}")
         return pd.Series(dtype=float)
@@ -199,17 +203,17 @@ def _dollar_signal() -> Tuple[float, float, float, Optional[str]]:
 
 def _inflation_signal(snapshot: Dict[str, float]) -> Tuple[float, float, float, Optional[str]]:
     """
-    10Y 通胀盈亏平衡利率（FRED T10YIE）趋势。
+    10Y 通胀盈亏平衡利率（FRED T10YIE）相对长期目标的偏离。
     通胀预期↑ → Fed 维持鹰派 → 压制高估值科技 → 偏空。
-    返回：(breakeven_10y, trend_20d, signal, anomaly_text_or_None)
+    返回：(breakeven_10y, deviation_from_target, signal, anomaly_text_or_None)
+
+    注意：snapshot 仅含最新值，无法计算真实 20d 趋势；此处用
+    「当前值 − 2.5% 长期目标」作偏离代理，第二个返回值是偏离量而非趋势。
     """
     val = snapshot.get("T10YIE")
     if val is None:
         return 0.0, 0.0, 0.0, None
 
-    # 从 FRED 历史序列计算趋势（snapshot 仅有最新值，简化用 DGS10-DGS2 代理趋势）
-    # 实际上这里我们只有当前值；趋势用 (T10YIE - 历史均值) 近似
-    # 使用 T10YIE 当前值 vs 2.5%（长期通胀目标+风险溢价）作基准
     TARGET_INFL = 2.5   # Fed 2% 目标 + 0.5% 风险溢价
     deviation   = float(val - TARGET_INFL)
     signal      = float(np.clip(-deviation / _INFL_NORM, -1.0, 1.0))
@@ -227,9 +231,8 @@ def _inflation_signal(snapshot: Dict[str, float]) -> Tuple[float, float, float, 
             f"（通缩风险，Fed 或转鸽，对科技股正面）"
         )
 
-    # trend 用和 TARGET 的偏差代理（正值代表上行压力）
-    trend = deviation
-    return float(val), trend, signal, alert
+    # 返回偏离量（正值=高于目标，上行压力），非真实 20d 趋势
+    return float(val), deviation, signal, alert
 
 
 # ── 主函数 ────────────────────────────────────────────────────────
@@ -241,35 +244,49 @@ def compute_external_factors(snapshot: Dict[str, float]) -> ExternalFactorsResul
     """
     anomalies: List[str] = []
 
-    # 1. 油价
+    # 1. 油价（价格为 0 = 下载失败 → 该因子不可用）
     oil_price, oil_ret, oil_sig, oil_alert = _oil_signal(snapshot)
     if oil_alert:
         anomalies.append(oil_alert)
+    oil_ok = oil_price > 0.0
 
-    # 2. 加息预期
-    fedfunds = snapshot.get("FEDFUNDS", 0.0) or 0.0
-    dgs2     = snapshot.get("DGS2",     0.0) or 0.0
-    hike_gap, hike_sig, hike_alert = _rate_hike_signal(dgs2, fedfunds)
-    if hike_alert:
-        anomalies.append(hike_alert)
+    # 2. 加息预期：FEDFUNDS 与 DGS2 缺一不可，否则会伪造 0/单边利差
+    ff_raw   = snapshot.get("FEDFUNDS")
+    dgs2_raw = snapshot.get("DGS2")
+    hike_ok  = ff_raw is not None and dgs2_raw is not None
+    if hike_ok:
+        fedfunds, dgs2 = float(ff_raw), float(dgs2_raw)
+        hike_gap, hike_sig, hike_alert = _rate_hike_signal(dgs2, fedfunds)
+        if hike_alert:
+            anomalies.append(hike_alert)
+    else:
+        fedfunds = dgs2 = hike_gap = hike_sig = 0.0
+        logger.warning("[ExtMacro] FEDFUNDS/DGS2 缺失，加息预期因子跳过（不计入综合）")
 
-    # 3. 美元
+    # 3. 美元（DXY 为 0 = 下载失败 → 不可用）
     dxy_level, dxy_ret, dollar_sig, dollar_alert = _dollar_signal()
     if dollar_alert:
         anomalies.append(dollar_alert)
+    dxy_ok = dxy_level > 0.0
 
     # 4. 通胀预期
     be10y, be_trend, infl_sig, infl_alert = _inflation_signal(snapshot)
     if infl_alert:
         anomalies.append(infl_alert)
-
-    # 综合外部因子得分（各项等权）
-    signals = [oil_sig, hike_sig, dollar_sig, infl_sig]
-    valid   = [s for s in signals if s != 0.0]
-    composite = float(np.mean(valid)) if valid else 0.0
+    infl_ok = snapshot.get("T10YIE") is not None
 
     # 异动惩罚：每项异动叠加 -0.1（最多 -0.3）
     anomaly_score = max(-0.30, -0.10 * len(anomalies))
+
+    # 综合外部因子得分：仅对【数据可用】的因子等权平均。
+    # 关键修正：以可用性而非 "signal!=0" 判定——0 是合法的中性信号，
+    # 不应与"缺失"混为一谈被剔除（否则中性因子被静默丢弃，拉偏均值）。
+    pairs = [(oil_sig, oil_ok), (hike_sig, hike_ok),
+             (dollar_sig, dxy_ok), (infl_sig, infl_ok)]
+    avail = [s for s, ok in pairs if ok]
+    composite = float(np.mean(avail)) if avail else 0.0
+    # 并入异动惩罚后再钳制（此前 anomaly_score 计算出来却从未影响最终得分）
+    composite = float(np.clip(composite + anomaly_score, -1.0, 1.0))
 
     # 汇总 reasoning
     parts = [

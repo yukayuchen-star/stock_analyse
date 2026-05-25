@@ -28,7 +28,8 @@ class MacroSignalResult:
     """
     宏观风险门控输出。
 
-    score (-1~1) = 0.50×vix_score + 0.30×yield_score + 0.20×bucket_avg_score
+    score (-1~1) = 0.35×vix_score + 0.20×yield_score
+                 + 0.30×external.composite_score + 0.15×bucket_avg_score
     position_limit 由 VIX 制度直接决定，优先于 score。
     """
     timestamp: pd.Timestamp

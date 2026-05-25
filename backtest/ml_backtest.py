@@ -280,12 +280,13 @@ def build_macro_features(start: str, end: str) -> pd.DataFrame:
         logger.warning(f"Macro data fetch failed: {exc}")
         return pd.DataFrame()
 
+    # squeeze(axis=1) 而非 squeeze()：单行下载时后者会塌成标量，破坏 .index/.rolling
     if isinstance(vix, pd.DataFrame):
-        vix = vix.squeeze()
+        vix = vix.squeeze(axis=1)
     if isinstance(tnx, pd.DataFrame):
-        tnx = tnx.squeeze()
+        tnx = tnx.squeeze(axis=1)
     if isinstance(tyx, pd.DataFrame):
-        tyx = tyx.squeeze()
+        tyx = tyx.squeeze(axis=1)
 
     macro = pd.DataFrame(index=vix.index)
     macro["vix_level"]  = vix
@@ -733,12 +734,14 @@ def chan_gated_analysis(
 # ── 报告 ──────────────────────────────────────────────────────────
 
 def build_ml_report(result: WalkForwardResult, dataset: MLDataset, date_str: str) -> str:
+    train_start = str(pd.Timestamp(dataset.df["date"].min()).date()) if not dataset.df.empty else "?"
     lines = [
         f"# LightGBM ML 历史回测报告 — {date_str}",
         "",
         "> **方法说明**  ",
         "> 走步前向验证（Expanding Window Walk-Forward）  ",
-        f"> 训练集：2022-01-01 起扩张；测试集：每 6 个月向前滚动  ",
+        f"> 训练集：{train_start} 起扩张；测试集：每 6 个月向前滚动  ",
+        f"> 净化：训练集剔除距测试折 {HOLD_DAYS} 个交易日的样本（purge/embargo）  ",
         f"> 预测目标：{HOLD_DAYS} 交易日后收益 > 0（做多盈利）  ",
         f"> 模型做多门槛：置信度 ≥ {CONF_THRESH:.0%}  ",
         f"> 宇宙：{len(dataset.tickers)} 只股票",
@@ -877,7 +880,10 @@ def build_ml_report(result: WalkForwardResult, dataset: MLDataset, date_str: str
             name   = str(row.get("feature", row.iloc[0]))
             imp    = float(row.get("importance", row.iloc[1]))
             explain = fi_explain.get(name, "—")
-            bar    = "█" * int(imp * 100) + "░" * (10 - int(imp * 100))
+            # importance 是归一化占比(求和=1)，头部特征常 >10%；钳到 [0,10]
+            # 防止 "░"*(负数) 与超长条（10格满 = 占比≥10%）
+            filled = max(0, min(10, int(round(imp * 100))))
+            bar    = "█" * filled + "░" * (10 - filled)
             lines.append(f"| {int(i)+1} | `{name}` | {bar} {imp:.2%} | {explain} |")
         lines.append("")
 

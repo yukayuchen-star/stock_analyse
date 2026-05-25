@@ -94,7 +94,7 @@ def _stock_report(d: StockDecision, date_str: str) -> str:
     # 缠论模块
     if chan:
         lines += [
-            "## 缠论分析（权重 40%）",
+            "## 缠论分析（权重 55%）",
             "",
             f"| 项目 | 值 |",
             f"|------|----|",
@@ -115,7 +115,7 @@ def _stock_report(d: StockDecision, date_str: str) -> str:
     # 量化模块
     if quant:
         lines += [
-            "## 量化分析（权重 40%）",
+            "## 量化分析（权重 10%）",
             "",
             f"| 因子 | 权重 | 得分 |",
             f"|------|------|------|",
@@ -133,7 +133,7 @@ def _stock_report(d: StockDecision, date_str: str) -> str:
     # 宏观模块
     ext = macro.external if macro else None
     lines += [
-        "## 宏观背景（权重 20%）",
+        "## 宏观背景（权重 35%）",
         "",
         f"| 项目 | 值 |",
         f"|------|----|",

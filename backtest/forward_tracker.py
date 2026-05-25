@@ -13,8 +13,8 @@
 存储：cache/forward_signals.db（独立 SQLite，不与价格缓存混用）
 
 评估规则：
-  - 入场价：entry_price_range 中点（信号当日收盘附近）
-  - 出场：第 5 个交易日收盘，或止损先触及时以止损价计
+  - 入场价：信号日收盘价（与 SL/TP 同价基；缺价格时回退到 entry_price_range 中点）
+  - 出场：第 5 个交易日收盘，或止损先触及时以 min(止损价, 当日开盘) 计（含跳空穿越）
   - 止损检测：逐日扫描 Low <= stop_loss
   - 方向：仅做多（Buy/Overweight）
 """
@@ -105,11 +105,16 @@ def log_signals(
     for ticker, d in decisions.items():
         if d.rating not in BUY_RATINGS:
             continue
-        # 入场价 = 信号日收盘价（与 SL/TP 同价基）；缺价格时回退到入场区间中点
+        # 入场价 = 信号日收盘价（与 SL/TP 同价基）；缺价格时回退到入场区间中点。
+        # logged_date 锚定到该收盘 bar 的真实日期（数据基准 = close[t-1]），
+        # 而非调用方传入的日历 today——否则评估期 df.index>logged_date 会与
+        # 入场 bar 错位（少算/多算一日），并使去重键随日历日漂移。
         entry_price = 0.0
+        entry_date  = date_str
         df_t = prices.get(ticker) if prices else None
         if df_t is not None and not df_t.empty:
             entry_price = float(df_t["Close"].iloc[-1])
+            entry_date  = str(pd.Timestamp(df_t.index[-1]).date())
         if entry_price <= 0:
             entry_price = (d.entry_price_range[0] + d.entry_price_range[1]) / 2.0
         if entry_price <= 0:
@@ -122,7 +127,7 @@ def log_signals(
                    (logged_date, ticker, rating, signal_type, bucket,
                     entry_price, stop_loss, take_profit, final_score)
                    VALUES (?,?,?,?,?,?,?,?,?)""",
-                (date_str, ticker, d.rating, signal_type, bucket,
+                (entry_date, ticker, d.rating, signal_type, bucket,
                  entry_price, d.stop_loss, d.take_profit, d.final_score),
             )
             if c.execute("SELECT changes()").fetchone()[0]:
@@ -214,7 +219,9 @@ def evaluate_pending(pipeline) -> int:
                     if float(bar["Low"]) <= stop_loss:
                         hit_stop = 1
                         stop_hit_date = str(bar_ts.date())
-                        exit_price = stop_loss
+                        # 跳空穿越：若开盘已低于止损，成交价为开盘价（更差），
+                        # 而非理想化的止损价——否则会系统性高估止损单收益
+                        exit_price = min(stop_loss, float(bar["Open"]))
                         exit_date  = stop_hit_date
                         break
 
@@ -281,7 +288,7 @@ def build_report(date_str: str) -> str:
         "",
         f"> **方法说明**  ",
         f"> 每日记录 Buy/Overweight 买入信号，持仓 **{HOLD_TRADING_DAYS} 个交易日**（≈1周）后评估盈亏。  ",
-        "> 入场价 = entry_price_range 中点；止损触及时以止损价出场；方向仅做多。  ",
+        "> 入场价 = 信号日收盘价；止损触及时以 min(止损价,当日开盘) 出场（含跳空）；方向仅做多。  ",
         f"> 统计窗口：最近 {REPORT_WINDOW_DAYS} 天",
         "",
         f"| | 数量 |",
