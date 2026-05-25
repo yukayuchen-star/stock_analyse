@@ -31,9 +31,11 @@ def main() -> None:
     args = parser.parse_args()
 
     tickers = list(STOCK_POOL) if args.pool_only else DEFAULT_UNIVERSE
-    # 数据下载从比回测起始早 6 个月（SMA200 预热）
+    # 数据下载从比回测起始早 14 个月预热：需覆盖最长特征窗口
+    # （SMA200=200TD、vix_pct252=252TD ≈ 12 个日历月）。早 7 个月不足，
+    # 会让回测首批样本的长窗口特征为 NaN→fillna(0)，污染前几折。
     import pandas as pd
-    warmup_start = (pd.Timestamp(args.start) - pd.DateOffset(months=7)).strftime("%Y-%m-%d")
+    warmup_start = (pd.Timestamp(args.start) - pd.DateOffset(months=14)).strftime("%Y-%m-%d")
     date_str     = today_str()
     output_dir   = Path("output") / "ml_backtest"
 

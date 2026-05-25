@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
+import pandas as pd
 from loguru import logger
 
 from decision.strategy import StockDecision
@@ -84,11 +85,15 @@ def log_signals(
     decisions: Dict[str, StockDecision],
     buckets: Dict[str, List[str]],
     date_str: str,
+    prices: Optional[Dict[str, "pd.DataFrame"]] = None,
 ) -> int:
     """
     记录当日 Buy/Overweight 决策到数据库。
     同一天同一 ticker 已存在时跳过（UNIQUE 约束）。
     返回新增信号数。
+
+    入场价取信号日收盘价（与 stop_loss/take_profit 同一价基，
+    二者均由 current_price 推导）。无价格时回退到 entry_price_range 中点。
     """
     ticker_bucket: Dict[str, str] = {}
     for bname, tlist in buckets.items():
@@ -100,7 +105,13 @@ def log_signals(
     for ticker, d in decisions.items():
         if d.rating not in BUY_RATINGS:
             continue
-        entry_price = (d.entry_price_range[0] + d.entry_price_range[1]) / 2.0
+        # 入场价 = 信号日收盘价（与 SL/TP 同价基）；缺价格时回退到入场区间中点
+        entry_price = 0.0
+        df_t = prices.get(ticker) if prices else None
+        if df_t is not None and not df_t.empty:
+            entry_price = float(df_t["Close"].iloc[-1])
+        if entry_price <= 0:
+            entry_price = (d.entry_price_range[0] + d.entry_price_range[1]) / 2.0
         if entry_price <= 0:
             continue
         signal_type = d.chan_signal.buy_point_type if d.chan_signal else None
@@ -164,10 +175,25 @@ def evaluate_pending(pipeline) -> int:
             logger.warning(f"[ForwardTracker] {ticker}: 无价格数据")
             continue
 
+        first_bar = df.index.min()
+
         for row in rows:
             logged_date = row["logged_date"]
             entry_price = row["entry_price"]
             stop_loss   = row["stop_loss"] or 0.0
+
+            # 信号日须落在价格窗口内：否则 df.index>logged_date 会把整段历史
+            # 当作"未来"，iloc[4] 取到错误的出场 bar，产生虚假盈亏。
+            if pd.Timestamp(logged_date) < first_bar:
+                logger.warning(
+                    f"[ForwardTracker] {ticker} {logged_date} 早于价格窗口"
+                    f"({first_bar.date()})，无法定位入场日，跳过"
+                )
+                continue
+
+            # 多头止损必须低于入场价；若不然（价基不一致等），视为无效，不扫描止损
+            if stop_loss >= entry_price:
+                stop_loss = 0.0
 
             # 确认已过足够交易日
             future = df[df.index > logged_date]

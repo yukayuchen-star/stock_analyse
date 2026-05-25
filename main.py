@@ -359,7 +359,7 @@ def run() -> None:
             logger.info(f"         风控: {flags}")
 
     # ── 前向验证：记录今日买入信号 ───────────────────────────
-    log_signals(decisions=decisions, buckets=buckets, date_str=date_str)
+    log_signals(decisions=decisions, buckets=buckets, date_str=date_str, prices=prices)
 
     # ── P6 报告 ──────────────────────────────────────────
     logger.info("── P6 报告层 ──")

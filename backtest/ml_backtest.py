@@ -322,7 +322,7 @@ class MLDataset:
 
 def build_dataset(
     tickers: List[str],
-    start: str = "2021-07-01",   # 比回测起点早 6m（WARMUP 预热）
+    start: str = "2020-11-01",   # 比回测起点早 14m：覆盖 SMA200/vix_pct252 长窗口
     end: Optional[str] = None,
     backtest_start: str = "2022-01-01",
 ) -> MLDataset:
@@ -507,26 +507,50 @@ def run_walk_forward(
         if fold_end > date_max:
             fold_end = date_max
 
-        train_mask = df["date_ts"] < fold_start
-        test_mask  = (df["date_ts"] >= fold_start) & (df["date_ts"] <= fold_end)
+        # ── 净化训练集：剔除 fold_start 前 HOLD_DAYS 个交易日 ──────────
+        # 标签 = close[t+HOLD_DAYS]/close[t]-1，故 fold_start 前 HOLD_DAYS 天的
+        # 训练行其前瞻标签会落入测试窗口 → 跨界泄漏（look-ahead）。purge 掉。
+        train_days = np.sort(df.loc[df["date_ts"] < fold_start, "date_ts"].unique())
+        if len(train_days) > HOLD_DAYS:
+            train_mask = df["date_ts"] < train_days[-HOLD_DAYS]
+        else:
+            train_mask = df["date_ts"] < fold_start
+        test_mask = (df["date_ts"] >= fold_start) & (df["date_ts"] <= fold_end)
 
-        X_train = df[train_mask][feature_cols].fillna(0)
-        y_train = df[train_mask]["label"]
-        X_test  = df[test_mask][feature_cols].fillna(0)
-        y_test  = df[test_mask]["label"]
+        train_df = df[train_mask]
+        X_test   = df[test_mask][feature_cols].fillna(0)
+        y_test   = df[test_mask]["label"]
 
-        if len(X_train) < 200 or len(X_test) < 10:
+        if len(train_df) < 200 or len(X_test) < 10:
             continue
-        if y_train.nunique() < 2 or y_test.nunique() < 2:
+        if train_df["label"].nunique() < 2 or y_test.nunique() < 2:
+            continue
+
+        # ── 早停验证集：取净化训练集的时间末段，与拟合段再隔 HOLD_DAYS ──
+        # eval_set 必须独立于测试折，否则 best_iteration 会借测试集反向选优，
+        # 虚高样本外 AUC/精确率（信息泄漏）。
+        tr_days = np.sort(train_df["date_ts"].unique())
+        split_i = int(len(tr_days) * 0.8)
+        if split_i > HOLD_DAYS and (len(tr_days) - split_i) > HOLD_DAYS:
+            fit_df = train_df[train_df["date_ts"] < tr_days[split_i - HOLD_DAYS]]
+            val_df = train_df[train_df["date_ts"] >= tr_days[split_i]]
+        else:
+            fit_df, val_df = train_df, None
+
+        X_fit, y_fit = fit_df[feature_cols].fillna(0), fit_df["label"]
+        if len(X_fit) < 200 or y_fit.nunique() < 2:
             continue
 
         model = lgb.LGBMClassifier(**lgb_params)
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_test, y_test)],
-            callbacks=[lgb.early_stopping(30, verbose=False),
-                       lgb.log_evaluation(-1)],
-        )
+        if val_df is not None and val_df["label"].nunique() >= 2:
+            model.fit(
+                X_fit, y_fit,
+                eval_set=[(val_df[feature_cols].fillna(0), val_df["label"])],
+                callbacks=[lgb.early_stopping(30, verbose=False),
+                           lgb.log_evaluation(-1)],
+            )
+        else:
+            model.fit(X_fit, y_fit)
 
         proba = model.predict_proba(X_test)[:, 1]
         df.loc[test_mask, "pred_proba"] = proba
@@ -556,7 +580,7 @@ def run_walk_forward(
             train_end=str((fold_start - pd.DateOffset(days=1)).date()),
             test_start=str(fold_start.date()),
             test_end=str(fold_end.date()),
-            n_train=int(len(X_train)),
+            n_train=int(len(X_fit)),
             n_test=int(len(X_test)),
             auc=auc,
             precision=precision,
