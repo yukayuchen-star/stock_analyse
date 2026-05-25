@@ -6,8 +6,8 @@ P5 决策层 — 三引擎得分合成（缠论 × 宏观 双主轴并行）
   - 宏观（VIX/利率/油价）特征重要性 81.7%，决定胜率环境 → 主轴二
   - 量化因子是弱预测器，且与缠论的边反相关 → 降为横截面配角
 
-标准：final_score = 0.50×chan + 0.30×macro + 0.20×quant
-背离：chan↑ quant↓ 时以缠论为准 → 0.65×chan + 0.25×macro + 0.10×quant
+标准：final_score = 0.55×chan + 0.35×macro + 0.10×quant
+背离：chan↑ quant↓ 时以缠论为准 → 0.70×chan + 0.20×macro + 0.10×quant
 
 并行一致性检测（缠论↔宏观互验）：
   共振   chan≥+0.30 且 macro≥0      → 双主轴看多，信号更可信
@@ -23,15 +23,15 @@ from signals.quant.factor_engine import QuantSignalResult
 from signals.macro.macro_signal  import MacroSignalResult
 
 
-# 标准权重：缠论 + 宏观 = 80% 双主轴，量化 20% 横截面配角
-W_CHAN  = 0.50
-W_QUANT = 0.20
-W_MACRO = 0.30
+# 标准权重：缠论 + 宏观 = 90% 双主轴，量化 10% 横截面配角
+W_CHAN  = 0.55
+W_QUANT = 0.10
+W_MACRO = 0.35
 
 # 背离权重：缠强量弱时进一步加重缠论
-W_CHAN_DIV  = 0.65
+W_CHAN_DIV  = 0.70
 W_QUANT_DIV = 0.10
-W_MACRO_DIV = 0.25
+W_MACRO_DIV = 0.20
 
 DIV_CHAN_MIN  =  0.30
 DIV_QUANT_MAX = -0.10
