@@ -131,6 +131,7 @@ def _stock_report(d: StockDecision, date_str: str) -> str:
         ]
 
     # 宏观模块
+    ext = macro.external if macro else None
     lines += [
         "## 宏观背景（权重 20%）",
         "",
@@ -139,8 +140,24 @@ def _stock_report(d: StockDecision, date_str: str) -> str:
         f"| VIX | {macro_vix} [{macro_regime}] |",
         f"| 仓位上限 | {macro_limit} |",
         f"| 10Y利差 | {macro_spread} |",
+    ]
+    if ext:
+        lines += [
+            f"| WTI 原油 | ${ext.oil_price:.1f} 20d{ext.oil_ret_20d:+.0%} (信号{ext.oil_signal:+.2f}) |",
+            f"| 加息预期 2Y-FF | {ext.rate_hike_gap:+.2f}pp (信号{ext.rate_hike_signal:+.2f}) |",
+            f"| 美元 DXY | {ext.dxy_level:.1f} 20d{ext.dxy_ret_20d:+.1%} (信号{ext.dollar_signal:+.2f}) |",
+            f"| 通胀预期 BE10Y | {ext.breakeven_10y:.2f}% (信号{ext.inflation_signal:+.2f}) |",
+        ]
+    lines += [
         f"| 宏观得分 | {macro_score} |",
         "",
+    ]
+    if ext and ext.anomalies:
+        lines += ["**⚠️ 异动预警**", ""]
+        for alert in ext.anomalies:
+            lines.append(f"> {alert}")
+        lines.append("")
+    lines += [
         "## 风险标签",
         "",
         flags_md,
@@ -167,19 +184,36 @@ def _daily_summary(
     macro_spread = f"{macro.yield_spread:+.2f}%"
     macro_score  = f"{macro.score:+.3f}"
 
+    ext = macro.external
+
     lines: List[str] = [
         f"# 每日量化分析报告 — {date_str}",
         "",
         "## 宏观环境",
         "",
-        f"| 指标 | 值 |",
-        f"|------|----|",
-        f"| VIX | {macro_vix} [{macro_regime}] |",
-        f"| 仓位上限 | {macro_limit} |",
-        f"| 10Y利差 | {macro_spread} |",
-        f"| 宏观得分 | {macro_score} |",
+        f"| 指标 | 值 | 信号 |",
+        f"|------|----|----|",
+        f"| VIX | {macro_vix} [{macro_regime}] | — |",
+        f"| 仓位上限 | {macro_limit} | — |",
+        f"| 10Y-2Y利差 | {macro_spread} | {macro.yield_score:+.2f} |",
+        f"| WTI 原油 | ${ext.oil_price:.1f} (20d {ext.oil_ret_20d:+.0%}) | {ext.oil_signal:+.2f} |",
+        f"| 加息预期 (2Y-FF) | {ext.rate_hike_gap:+.2f}pp | {ext.rate_hike_signal:+.2f} |",
+        f"| 美元指数 DXY | {ext.dxy_level:.1f} (20d {ext.dxy_ret_20d:+.1%}) | {ext.dollar_signal:+.2f} |",
+        f"| 通胀预期 BE10Y | {ext.breakeven_10y:.2f}% | {ext.inflation_signal:+.2f} |",
+        f"| 外部因子综合 | — | {ext.composite_score:+.2f} |",
+        f"| **宏观得分** | — | **{macro_score}** |",
         "",
     ]
+
+    # 异动预警
+    if ext.anomalies:
+        lines += [
+            "### ⚠️ 宏观异动预警",
+            "",
+        ]
+        for alert in ext.anomalies:
+            lines.append(f"> {alert}")
+        lines.append("")
 
     # 桶强度
     if macro.bucket_ir:

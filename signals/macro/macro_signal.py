@@ -8,12 +8,16 @@ from loguru import logger
 
 from signals.macro.regime          import classify_vix, VIXRegime
 from signals.macro.sector_strength import compute_all_bucket_ir
+from signals.macro.external_factors import compute_external_factors, ExternalFactorsResult
 
 
-# ── 宏观得分权重 ──────────────────────────────────────────────
-W_VIX    = 0.50   # VIX 制度（主导因子）
-W_YIELD  = 0.30   # 10Y-2Y 利差（利率环境）
-W_BUCKET = 0.20   # 桶相对 QQQ 的 IR（行业强度）
+# ── 宏观得分权重（合计=1.0）────────────────────────────────────
+# 原架构：VIX(50) + Yield(30) + Bucket(20)
+# 新架构：引入外部因子（油价/加息预期/美元/通胀），降低 VIX/Yield 权重
+W_VIX      = 0.35   # VIX 制度（主导情绪门控）
+W_YIELD    = 0.20   # 10Y-2Y 利差（利率环境）
+W_EXTERNAL = 0.30   # 外部因子综合（油价+加息预期+美元+通胀）
+W_BUCKET   = 0.15   # 桶相对 QQQ 的 IR（行业强度）
 
 # 利差正常化锚点（±1.5% spread → ±1 score）
 YIELD_NORM = 1.5
@@ -44,6 +48,9 @@ class MacroSignalResult:
     # 桶强度（vs QQQ）
     bucket_ir:     Dict[str, float] = field(default_factory=dict)   # 年化 IR
     bucket_scores: Dict[str, float] = field(default_factory=dict)   # -1~1
+
+    # 外部因子（油价/加息预期/美元/通胀）
+    external: ExternalFactorsResult = field(default_factory=ExternalFactorsResult)
 
     # 综合
     score:     float = 0.0   # -1~1
@@ -87,27 +94,39 @@ def compute_macro_signal(
         yield_score = float(np.clip(spread / YIELD_NORM, -1.0, 1.0))
         logger.debug(f"[Macro] 10Y={dgs10:.2f}% 2Y={dgs2:.2f}% spread={spread:+.2f}% yield_score={yield_score:+.2f}")
 
-    # ── 3. 桶强度 vs QQQ ─────────────────────────────────────
+    # ── 3. 外部因子（油价 / 加息预期 / 美元 / 通胀）────────────
+    logger.info("── P3 外部宏观因子 ──")
+    external = compute_external_factors(snapshot)
+
+    # ── 4. 桶强度 vs QQQ ─────────────────────────────────────
     bucket_ir, bucket_scores = compute_all_bucket_ir(buckets, prices, lookback=60)
     bucket_avg = float(np.mean(list(bucket_scores.values()))) if bucket_scores else 0.0
 
-    # ── 4. 综合得分 ──────────────────────────────────────────
+    # ── 5. 综合得分 ──────────────────────────────────────────
     score = float(np.clip(
-        W_VIX    * regime.score
-        + W_YIELD  * yield_score
-        + W_BUCKET * bucket_avg,
+        W_VIX      * regime.score
+        + W_YIELD    * yield_score
+        + W_EXTERNAL * external.composite_score
+        + W_BUCKET   * bucket_avg,
         -1.0, 1.0,
     ))
 
-    # ── 5. 描述 ──────────────────────────────────────────────
+    # ── 6. 描述 + 异动预警 ───────────────────────────────────
     bucket_str = " ".join(f"{k}={v:+.2f}" for k, v in bucket_scores.items())
     reasoning  = (
         f"VIX={vix:.1f}({regime.regime}) vix_score={regime.score:+.2f} | "
         f"10Y-2Y={spread:+.2f}% yield_score={yield_score:+.2f} | "
+        f"ExtFactor={external.composite_score:+.2f}"
+        f"(Oil={external.oil_signal:+.2f} Hike={external.rate_hike_signal:+.2f}"
+        f" DXY={external.dollar_signal:+.2f} Infl={external.inflation_signal:+.2f}) | "
         f"buckets=[{bucket_str}] avg={bucket_avg:+.2f} "
         f"→ macro_score={score:+.3f} pos_limit={regime.position_limit:.0%}"
     )
+    if external.anomalies:
+        reasoning += f" | 宏观异动({len(external.anomalies)}项)!"
     logger.info(f"[Macro] {reasoning}")
+    for alert in external.anomalies:
+        logger.warning(f"[Macro] {alert}")
 
     return MacroSignalResult(
         timestamp      = pd.Timestamp.now(),
@@ -121,6 +140,7 @@ def compute_macro_signal(
         yield_score    = round(yield_score, 4),
         bucket_ir      = bucket_ir,
         bucket_scores  = bucket_scores,
+        external       = external,
         score          = round(score, 4),
         reasoning      = reasoning,
     )
