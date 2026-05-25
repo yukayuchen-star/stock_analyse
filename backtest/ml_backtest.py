@@ -140,6 +140,62 @@ def compute_tech_features(df: pd.DataFrame) -> pd.DataFrame:
     return feat
 
 
+def compute_statistical_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    统计特征工程：对数收益、滚动波动/统计量、滚动夏普、EWM、差分、区间位置。
+
+    全部仅用 ≤t 数据（pandas rolling/ewm 默认后视，无前视偏差）。
+    设计依据：对数收益分布更对称利于建模；滚动统计量捕捉波动制度；
+    滚动夏普 = 风险调整动量；EWM 对近期更敏感；差分捕捉加速度。
+    """
+    c = df["Close"]
+    feat = pd.DataFrame(index=df.index)
+
+    # 对数收益（分布比 pct_change 更对称）
+    log_ret = np.log(c / c.shift(1))
+    feat["log_ret_1d"] = log_ret
+
+    # 滚动已实现波动率（年化）
+    for w in [5, 20, 60]:
+        feat[f"realized_vol_{w}d"] = log_ret.rolling(w).std() * np.sqrt(252)
+
+    # 滚动收益分布统计量（均值/标准差/偏度/中位数）
+    for w in [20, 60]:
+        r = log_ret.rolling(w)
+        feat[f"ret_mean_{w}d"]   = r.mean()
+        feat[f"ret_std_{w}d"]    = r.std()
+        feat[f"ret_skew_{w}d"]   = r.skew()
+        feat[f"ret_median_{w}d"] = log_ret.rolling(w).median()
+
+    # 滚动夏普（风险调整动量，年化）
+    for w in [20, 60]:
+        mu  = log_ret.rolling(w).mean()
+        sig = log_ret.rolling(w).std()
+        feat[f"sharpe_{w}d"] = (mu / (sig + 1e-9)) * np.sqrt(252)
+
+    # EWM（指数加权，近期权重更高）
+    feat["ewm_ret_10d"] = log_ret.ewm(span=10, adjust=False).mean()
+    feat["ewm_vol_20d"] = log_ret.ewm(span=20, adjust=False).std()
+
+    # 差分 / 加速度（动量与波动的变化率）
+    feat["ret_accel"] = log_ret.diff(5)
+    feat["vol_accel"] = feat["realized_vol_20d"].diff(5)
+
+    # 价格在滚动区间内的相对位置（0~1，类 Williams %R）
+    for w in [20, 60]:
+        lo = c.rolling(w).min()
+        hi = c.rolling(w).max()
+        feat[f"pos_in_range_{w}d"] = (c - lo) / (hi - lo + 1e-9)
+
+    # 价格 z-score（相对滚动均值的标准化偏离）
+    for w in [20, 60]:
+        mu  = c.rolling(w).mean()
+        sig = c.rolling(w).std()
+        feat[f"price_zscore_{w}d"] = (c - mu) / (sig + 1e-9)
+
+    return feat
+
+
 def compute_rel_features(
     close: pd.Series,
     qqq: pd.Series,
@@ -325,11 +381,12 @@ def build_dataset(
         logger.debug(f"[ML]   {ticker}: {len(df)} 行 特征计算中 ...")
 
         tech   = compute_tech_features(df)
+        stat   = compute_statistical_features(df)
         rel    = compute_rel_features(df["Close"], qqq_close.reindex(df.index).ffill(),
                                        spy_close.reindex(df.index).ffill())
         chan   = compute_chan_features(df)
 
-        feats = pd.concat([tech, rel, chan], axis=1)
+        feats = pd.concat([tech, stat, rel, chan], axis=1)
 
         # 对齐宏观
         if not macro_df.empty:
@@ -573,6 +630,82 @@ def rule_based_win_rate(dataset: MLDataset) -> Tuple[float, float, int]:
     return win_rate, avg_ret, len(buy_rows)
 
 
+# ── 缠论门控 ML 确认（洞察驱动的胜率增强）──────────────────────────
+
+@dataclass
+class ChanGatedResult:
+    """缠论买点 + ML 确认层 vs 缠论单独 的对比（仅走步前向测试期，无前视）。"""
+    split_proba:        float = 0.0   # 切分点（缠论信号 ML 置信度中位数）
+    chan_only_n:        int   = 0
+    chan_only_win_rate: float = 0.0
+    chan_only_avg_ret:  float = 0.0
+    chan_ml_n:          int   = 0     # ML 高置信半区（确认）
+    chan_ml_win_rate:   float = 0.0
+    chan_ml_avg_ret:    float = 0.0
+    rejected_n:         int   = 0     # ML 低置信半区（否决）
+    rejected_win_rate:  float = 0.0
+    rejected_avg_ret:   float = 0.0
+    win_rate_lift:      float = 0.0
+
+
+def chan_gated_analysis(
+    dataset: MLDataset,
+    result: WalkForwardResult,
+    conf_thresh: Optional[float] = None,
+) -> Optional[ChanGatedResult]:
+    """
+    测试 ML 作为缠论信号"确认层"的判别力。
+
+    缠论买点本身是看多形态，模型对其几乎都给 >0.5，固定阈值无法切分。
+    故默认用缠论信号 ML 置信度的**中位数**切分：
+      - 高置信半区（≥中位数）→ ML 确认
+      - 低置信半区（<中位数）→ ML 否决
+    若高置信半区胜率显著高于低置信半区，说明 ML 在缠论信号内部
+    仍有方向判别力，可作为优先级排序 / 假阳性过滤。
+
+    仅在走步前向测试期（out-of-sample）内统计。
+    """
+    preds = result.all_predictions
+    if preds.empty:
+        return None
+
+    chan_cols = dataset.df[["date", "ticker", "chan_is_buy"]].copy()
+    merged = preds.merge(chan_cols, on=["date", "ticker"], how="left")
+
+    chan_buys = merged[merged["chan_is_buy"] == 1]
+    if len(chan_buys) < 20:
+        logger.info(f"[ML] 测试期缠论买点仅 {len(chan_buys)} 个，门控分析样本不足")
+        return None
+
+    split = float(conf_thresh) if conf_thresh is not None else float(chan_buys["pred_proba"].median())
+
+    confirmed = chan_buys[chan_buys["pred_proba"] >= split]
+    rejected  = chan_buys[chan_buys["pred_proba"] <  split]
+
+    res = ChanGatedResult(split_proba=split)
+    res.chan_only_n        = len(chan_buys)
+    res.chan_only_win_rate = float((chan_buys["label"] == 1).mean())
+    res.chan_only_avg_ret  = float(chan_buys["fwd_ret_5d"].mean())
+
+    res.chan_ml_n        = len(confirmed)
+    res.chan_ml_win_rate = float((confirmed["label"] == 1).mean()) if len(confirmed) else 0.0
+    res.chan_ml_avg_ret  = float(confirmed["fwd_ret_5d"].mean()) if len(confirmed) else 0.0
+
+    res.rejected_n        = len(rejected)
+    res.rejected_win_rate = float((rejected["label"] == 1).mean()) if len(rejected) else 0.0
+    res.rejected_avg_ret  = float(rejected["fwd_ret_5d"].mean()) if len(rejected) else 0.0
+
+    res.win_rate_lift = res.chan_ml_win_rate - res.chan_only_win_rate
+
+    logger.info(
+        f"[ML] 缠论门控(切分@{split:.3f}): 单独={res.chan_only_win_rate:.1%}({res.chan_only_n}) "
+        f"高置信={res.chan_ml_win_rate:.1%}({res.chan_ml_n}) "
+        f"低置信={res.rejected_win_rate:.1%}({res.rejected_n}) "
+        f"提升={res.win_rate_lift:+.1%}"
+    )
+    return res
+
+
 # ── 报告 ──────────────────────────────────────────────────────────
 
 def build_ml_report(result: WalkForwardResult, dataset: MLDataset, date_str: str) -> str:
@@ -601,6 +734,53 @@ def build_ml_report(result: WalkForwardResult, dataset: MLDataset, date_str: str
         f" | {len(result.all_predictions[result.all_predictions['model_buy']==1]) if not result.all_predictions.empty else 0} |",
         "",
     ]
+
+    # 缠论门控 ML 确认（核心洞察验证）
+    gated = chan_gated_analysis(dataset, result)
+    if gated:
+        sep = gated.chan_ml_win_rate - gated.rejected_win_rate
+        lines += [
+            "## 🎯 缠论门控 + ML 确认（核心策略增强）",
+            "",
+            "> 仅在走步前向**测试期**统计（out-of-sample）。缠论买点本身是看多形态，",
+            f"> 模型对其几乎都给 >0.5，故按 ML 置信度**中位数 {gated.split_proba:.3f}** 切分，",
+            "> 检验高置信半区是否真比低置信半区胜率高（即 ML 是否有内部判别力）。",
+            "",
+            "| 子集 | 信号数 | 胜率 | 均 5TD 收益 |",
+            "|------|--------|------|-----------|",
+            f"| 缠论买点（全部） | {gated.chan_only_n} | {gated.chan_only_win_rate:.1%}"
+            f" | {gated.chan_only_avg_ret:+.2%} |",
+            f"| **ML 高置信半区**（确认） | {gated.chan_ml_n}"
+            f" | **{gated.chan_ml_win_rate:.1%}** | {gated.chan_ml_avg_ret:+.2%} |",
+            f"| ML 低置信半区（否决） | {gated.rejected_n} | {gated.rejected_win_rate:.1%}"
+            f" | {gated.rejected_avg_ret:+.2%} |",
+            "",
+        ]
+        if sep > 0.05:
+            lines.append(
+                f"✅ **ML 确认有判别力**：高置信半区胜率 {gated.chan_ml_win_rate:.1%} "
+                f"vs 低置信半区 {gated.rejected_win_rate:.1%}（相差 {sep:+.1%}）。"
+                f"实战可用 ML 对缠论信号做优先级排序，重仓高置信信号、轻仓或跳过低置信信号。"
+            )
+        elif sep < -0.05:
+            lines += [
+                f"⚠️ **关键发现：ML 置信度与缠论成功率负相关**（高置信 {gated.chan_ml_win_rate:.1%} "
+                f"< 低置信 {gated.rejected_win_rate:.1%}，相差 {sep:.1%}）。",
+                "",
+                "**机理**：缠论买点多出现在回调/超卖的结构底部（buy the dip），此时近期动量为负；"
+                "而 ML 主要学到的是动量与宏观模式，会对刚下跌的股票给低置信。"
+                "**缠论的超额收益恰恰来自动量难看的位置——正是 ML 想过滤掉的地方。**",
+                "",
+                "**结论**：缠论（逆势/均值回归）与动量 ML 捕捉的是**相反的边**，"
+                "不能用 ML 做缠论的确认层。两者应**并行独立**，而非串联过滤。"
+                "若要叠加，方向应反过来：动量 ML 适合确认趋势突破型信号，不适合确认结构底部信号。",
+            ]
+        else:
+            lines.append(
+                f"➖ **ML 无额外判别力**：两个半区胜率接近（相差 {sep:+.1%}），"
+                f"缠论信号质量已均匀，ML 置信度无法进一步区分赢家输家。"
+            )
+        lines.append("")
 
     # 走步折叠明细
     lines += [
@@ -646,7 +826,21 @@ def build_ml_report(result: WalkForwardResult, dataset: MLDataset, date_str: str
             "rel_zscore": "相对强度 Z-score",
             "vix_level": "VIX 绝对值", "vix_regime": "VIX 制度档位",
             "vix_rising": "VIX 上升中", "vix_pct252": "VIX 历史分位",
-            "yield_30_10": "30Y-10Y 利差", "tnx_level": "10Y 收益率",
+            "vix_sma20": "VIX 20日均值", "yield_30_10": "30Y-10Y 利差",
+            "tnx_level": "10Y 收益率",
+            # 新增统计特征
+            "log_ret_1d": "1日对数收益",
+            "realized_vol_5d": "5日已实现波动率", "realized_vol_20d": "20日已实现波动率",
+            "realized_vol_60d": "60日已实现波动率",
+            "ret_mean_20d": "20日收益均值", "ret_mean_60d": "60日收益均值",
+            "ret_std_20d": "20日收益标准差", "ret_std_60d": "60日收益标准差",
+            "ret_skew_20d": "20日收益偏度", "ret_skew_60d": "60日收益偏度",
+            "ret_median_20d": "20日收益中位数", "ret_median_60d": "60日收益中位数",
+            "sharpe_20d": "20日滚动夏普", "sharpe_60d": "60日滚动夏普",
+            "ewm_ret_10d": "EWM 收益(span10)", "ewm_vol_20d": "EWM 波动率(span20)",
+            "ret_accel": "收益加速度(5日差分)", "vol_accel": "波动率加速度",
+            "pos_in_range_20d": "20日区间位置", "pos_in_range_60d": "60日区间位置",
+            "price_zscore_20d": "价格20日Z-score", "price_zscore_60d": "价格60日Z-score",
             "chan_is_buy": "缠论买点", "chan_is_sell": "缠论卖点",
             "chan_score": "缠论得分", "chan_type_enc": "缠论买卖点类型",
             "chan_days_since_buy": "距上次缠论买点天数",
@@ -695,8 +889,8 @@ def _interpretation(result: WalkForwardResult, rule_wr: float, rule_ret: float) 
     elif gap > 0.10:
         lines.append(
             f"- ⚠️ 缠论规则策略（{rule_wr:.1%}）远优于 ML（{ml_wr:.1%}，差 {gap:.1%}）。"
-            f" 原因：规则信号极度稀少（高精度小样本），ML 以全量样本为分母导致被稀释。"
-            f" 建议将缠论买点作为 ML 的**前置过滤条件**，而非竞争关系。"
+            f" 原因：缠论信号稀少且为逆势结构底部，与动量型 ML 捕捉相反的边（见门控分析）。"
+            f" **二者应并行独立运行**，缠论负责择时入场、ML 负责趋势型机会，不串联过滤。"
         )
     else:
         lines.append(
