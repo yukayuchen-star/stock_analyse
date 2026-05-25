@@ -1,70 +1,81 @@
+# US Stock Quant Analysis & Smart Investment System
 # 美股量化分析与智能投资系统
 
-**双引擎设计**：缠论（择时）× 量化多因子（选股），宏观制度做风险门控。
+**Dual-Engine Design | 双引擎设计**：  
+Chan Theory (Timing) × Quant Multi-Factor (Stock Selection), Macro Regime (Risk Gate)  
+缠论（择时）× 量化多因子（选股），宏观制度做风险门控
 
-## 快速开始
+## Quick Start | 快速开始
 
 ```bash
-cp .env.example .env   # 填入 API Keys
-python main.py         # 输出报告到 output/YYYY-MM-DD/
+cp .env.example .env   # Fill in API Keys | 填入 API Keys
+python main.py         # Output report to output/YYYY-MM-DD/ | 输出报告到 output/YYYY-MM-DD/
 ```
 
-## 股票池（3 桶）
+## Stock Pool (3 Buckets) | 股票池（3 桶）
 
-| 桶 | 标的 |
-|----|------|
-| Mega-Tech | GOOGL AAPL NVDA MSFT META |
-| Consumer | AMZN TSLA |
-| Hardware | SNDK VRT |
-| 基准 | QQQ SPY ^VIX ^TNX |
+| Bucket | Tickers | 桶 | 标的 |
+|--------|---------|-----|------|
+| Mega-Tech | GOOGL AAPL NVDA MSFT META | Mega科技 | GOOGL AAPL NVDA MSFT META |
+| Consumer | AMZN TSLA | 消费 | AMZN TSLA |
+| Hardware | SNDK VRT | 硬件 | SNDK VRT |
+| Benchmark | QQQ SPY ^VIX ^TNX | 基准 | QQQ SPY ^VIX ^TNX |
 
 ---
 
-## 四层架构
+## Four-Layer Architecture | 四层架构
 
 ```
-Layer 4  报告输出    output/YYYY-MM-DD/{TICKER}.md + daily_summary.md
+Layer 4  Report      output/YYYY-MM-DD/{TICKER}.md + daily_summary.md
+         报告输出    output/YYYY-MM-DD/{TICKER}.md + daily_summary.md
              ▲
-Layer 3  决策层      双引擎共振打分 → 5 档评级 + VIX 仓位门控 + 3 桶过滤
+Layer 3  Decision    Dual-engine resonance scoring → 5-tier rating + VIX position control + bucket filter
+         决策层      双引擎共振打分 → 5档评级 + VIX仓位门控 + 3桶过滤
              ▲
-Layer 2  信号层
-         ├── 缠论 (40%)  择时引擎：分型→笔→中枢→买卖点，多级别共振
-         ├── 量化 (40%)  选股引擎：趋势+动量+相对强度+量价因子
-         └── 宏观 (20%)  风险门控：VIX制度+利率环境+桶强度排名
+Layer 2  Signals
+         信号层
+         ├── Chan Theory (40%)    Timing engine: Fractal→Stroke→Pivot→Trade Points, multi-level resonance
+         ├── 缠论 (40%)           择时引擎：分型→笔→中枢→买卖点，多级别共振
+         ├── Quant (40%)          Stock selection: trend+momentum+relative strength+volume
+         ├── 量化 (40%)           选股引擎：趋势+动量+相对强度+量价因子
+         └── Macro (20%)          Risk gate: VIX regime + rate environment + bucket strength
+         └── 宏观 (20%)           风险门控：VIX制度+利率环境+桶强度排名
              ▲
-Layer 1  数据底座    yfinance + Alpha Vantage + Finnhub + FRED + SQLite 缓存
+Layer 1  Data        yfinance + Alpha Vantage + Finnhub + FRED + SQLite cache
+         数据底座    yfinance + Alpha Vantage + Finnhub + FRED + SQLite 缓存
 ```
 
 ---
 
-## 打分公式（核心）
+## Scoring Formula (Core) | 打分公式（核心）
 
 ```
 final_score = 0.40 × chan_score + 0.40 × quant_score + 0.20 × macro_score
 ```
 
-### 缠论得分（chan_score）
+### Chan Theory Score (chan_score) | 缠论得分（chan_score）
 
-| 信号 | 得分 | 说明 |
-|------|------|------|
-| 1 买点 + 三级共振 | +1.0 | 最强入场信号 |
-| 1 买点 + 二级共振 | +0.8 | 强信号 |
-| 2 买点 | +0.5 | 标准追多 |
-| 3 买点 | +0.3 | 试仓 |
-| 中性（无信号） | 0.0 | 观望 |
-| 1/2/3 卖点对称 | 负值 | 离场信号 |
+| Signal | Score | Note | 信号 | 得分 | 说明 |
+|--------|-------|------|------|------|------|
+| 1st Buy + 3-level resonance | +1.0 | Strongest entry | 1买+三级共振 | +1.0 | 最强入场信号 |
+| 1st Buy + 2-level resonance | +0.8 | Strong | 1买+二级共振 | +0.8 | 强信号 |
+| 2nd Buy | +0.5 | Standard | 2买 | +0.5 | 标准追多 |
+| 3rd Buy | +0.3 | Trial | 3买 | +0.3 | 试仓 |
+| Neutral (No signal) | 0.0 | Watch | 中性（无信号） | 0.0 | 观望 |
+| Sell points (1/2/3) | Negative | Exit | 卖点对称 | 负值 | 离场信号 |
 
-### 量化得分（quant_score）
+### Quant Score (quant_score) | 量化得分（quant_score）
 
+Quant factors in five groups for fundamental selection → trend confirmation → momentum entry points → fine timing:  
 量化因子分五组，对应 quant.md 五层架构（先用基本面找赢家，趋势确认方向，动量找买点，缠论精细择时）：
 
-| 子因子组 | 权重 | 具体指标 | 对应层 |
-|---------|------|---------|-------|
-| **基本面** | 15% | Revenue/EPS Growth, ROE, Gross Margin, D/E, PEG | Layer1 长期筛选 |
-| **趋势因子** | 25% | SMA20/60/200 位置排列；ADX14；EMA20 斜率 | Layer2 方向确认 |
-| **动量因子** | 30% | ROC20；MACD 柱；RSI14；KAMA；Pullback/Breakout 信号 | Layer3 买点（缠论前置接口）|
-| **相对强度** | 20% | vs QQQ/SPY 超额收益；桶内横截面 Z-score | 横截面选股 |
-| **量价因子** | 10% | OBV 趋势；VWMA20 偏离 | 量价确认 |
+| Factor Group | Weight | Metrics | Layer | 子因子组 | 权重 | 具体指标 | 对应层 |
+|--------------|--------|---------|-------|---------|------|---------|-------|
+| **Fundamentals** | 15% | Rev/EPS Growth, ROE, Gross Margin, D/E, PEG | Layer1 | **基本面** | 15% | Revenue/EPS增长率、ROE、毛利率、债权比、PEG | 长期筛选 |
+| **Trend** | 25% | SMA20/60/200 arrangement; ADX14; EMA20 slope | Layer2 | **趋势因子** | 25% | SMA20/60/200位置排列、ADX14、EMA20斜率 | 方向确认 |
+| **Momentum** | 30% | ROC20; MACD histogram; RSI14; KAMA; Pullback/Breakout | Layer3 | **动量因子** | 30% | ROC20、MACD柱、RSI14、KAMA、回调/突破信号 | 买点（缠论前置）|
+| **Relative Strength** | 20% | Excess return vs QQQ/SPY; Cross-sectional Z-score | Cross-sec | **相对强度** | 20% | vs QQQ/SPY超额收益、桶内横截面Z-score | 选股 |
+| **Volume** | 10% | OBV trend; VWMA20 deviation | Confirm | **量价因子** | 10% | OBV趋势、VWMA20偏离 | 确认 |
 
 ```python
 quant_score = (
@@ -80,61 +91,69 @@ quant_score = (
 > - 回调买入：上升趋势中价格接触 EMA20（±3%） → 附加 +0.30（对应缠论二买/三买入场区）
 > - 突破信号：价格在 52W 高点 3% 以内 → 附加 +0.20（趋势延续买点）
 
-### 宏观得分（macro_score）
+### Macro Score (macro_score) | 宏观得分（macro_score）
 
-| 指标 | 作用 |
-|------|------|
-| VIX 四档制度 | 仓位门控（见下） |
-| 10Y - 2Y 利差 | 正利差为正，倒挂为负 |
-| 桶相对 QQQ 的 IR | 强桶得分更高 |
+| Indicator | Purpose | 指标 | 作用 |
+|-----------|---------|------|------|
+| VIX 4-Tier Regime | Position control (see below) | VIX 四档制度 | 仓位门控（见下） |
+| 10Y - 2Y Yield Spread | Positive spread (+), inversion (−) | 10Y - 2Y 利差 | 正利差为正，倒挂为负 |
+| Bucket IR vs QQQ | Stronger buckets score higher | 桶相对 QQQ 的 IR | 强桶得分更高 |
 
 ---
 
-## 三个原创设计
+## Three Core Design Principles | 三个原创设计
 
-### 1. 双引擎共振逻辑
+### 1. Dual-Engine Resonance Logic | 双引擎共振逻辑
 
 ```
+Chan ↑ + Quant ↑ + Macro ↑ → All three aligned, full position
 缠论 ↑ + 量化 ↑ + 宏观 ↑ → 三引擎同向，满仓信号
+
+Chan ↑ + Quant ↑, Macro neutral → Two engines aligned, standard position
 缠论 ↑ + 量化 ↑，宏观中性 → 两引擎同向，标准仓位
-缠论 ↑，量化 ↓            → 背离，试仓或观望
-缠论 ↓，量化 ↑            → 背离，等缠论确认
+
+Chan ↑, Quant ↓ → Divergence, trial or watch
+缠论 ↑，量化 ↓ → 背离，试仓或观望
+
+Chan ↓, Quant ↑ → Divergence, await chan confirmation
+缠论 ↓，量化 ↑ → 背离，等缠论确认
 ```
 
+**When Chan and Quant diverge, prioritize Chan (structural > statistical judgement).**  
 **缠论与量化背离时，以缠论为准（缠论是结构性判断，量化是统计性判断）。**
 
-### 2. 缠论多级别共振（等精髓输入后实现）
+### 2. Multi-Level Chan Resonance | 缠论多级别共振
 
-| 级别组合 | 买点级别 | 操作 |
-|---------|---------|------|
-| 日线 + 60min + 30min | 大级别 1 买点 | 重仓 |
-| 日线 + 60min | 中级别 2 买点 | 标准仓位 |
-| 仅日线 | 小级别 3 买点 | 试仓 |
+| Level Combination | Buy Level | Action | 级别组合 | 买点级别 | 操作 |
+|-------------------|-----------|--------|---------|---------|------|
+| Daily + 60min + 30min | Major 1st Buy | Heavy position | 日线 + 60min + 30min | 大级别 1 买点 | 重仓 |
+| Daily + 60min | Mid 2nd Buy | Standard position | 日线 + 60min | 中级别 2 买点 | 标准仓位 |
+| Daily only | Minor 3rd Buy | Trial position | 仅日线 | 小级别 3 买点 | 试仓 |
 
-### 3. VIX 四档制度仓位
+### 3. VIX 4-Tier Position Control | VIX 四档制度仓位
 
-| VIX | 制度 | 仓位上限 | 缠论买点门槛 |
-|-----|------|---------|------------|
-| < 15 | 平静 | 100% | 接受 2买/3买 |
-| 15–25 | 中性 | 70% | 接受 1买/2买 |
-| 25–35 | 紧张 | 40% | 仅接受 1买+多级共振 |
-| > 35 | 恐慌 | 0% | 全部观望 |
-
----
-
-## 5 档评级映射
-
-| final_score | 评级 | 建议仓位 |
-|------------|------|---------|
-| ≥ 0.60 | **Buy** | position_limit × 100% |
-| 0.30–0.60 | **Overweight** | position_limit × 70% |
-| −0.30–0.30 | **Hold** | 持仓不变 |
-| −0.60–−0.30 | **Underweight** | 减半仓 |
-| < −0.60 | **Sell** | 清仓 |
+| VIX | Regime | Position Limit | Chan Entry Threshold | VIX | 制度 | 仓位上限 | 缠论买点门槛 |
+|-----|--------|------------------|----------------------|-----|------|---------|------------|
+| < 15 | Calm | 100% | Accept 2/3 Buy | < 15 | 平静 | 100% | 接受 2买/3买 |
+| 15–25 | Neutral | 70% | Accept 1/2 Buy | 15–25 | 中性 | 70% | 接受 1买/2买 |
+| 25–35 | Tense | 40% | 1st Buy + multi-level only | 25–35 | 紧张 | 40% | 仅接受 1买+多级共振 |
+| > 35 | Panic | 0% | Sit on sidelines | > 35 | 恐慌 | 0% | 全部观望 |
 
 ---
 
-## 目录结构
+## 5-Tier Rating Map | 5 档评级映射
+
+| final_score | Rating | Position Guidance | final_score | 评级 | 建议仓位 |
+|------------|--------|------------------|------------|------|---------|
+| ≥ 0.60 | **Buy** | position_limit × 100% | ≥ 0.60 | **买入** | position_limit × 100% |
+| 0.30–0.60 | **Overweight** | position_limit × 70% | 0.30–0.60 | **增仓** | position_limit × 70% |
+| −0.30–0.30 | **Hold** | Hold current position | −0.30–0.30 | **持仓** | 持仓不变 |
+| −0.60–−0.30 | **Underweight** | Reduce to half | −0.60–−0.30 | **减仓** | 减半仓 |
+| < −0.60 | **Sell** | Clear position | < −0.60 | **清仓** | 清仓 |
+
+---
+
+## Directory Structure | 目录结构
 
 ```
 stock_analyse/
@@ -189,34 +208,42 @@ stock_analyse/
 
 ---
 
-## 数据源预算
+## Data Source Budget | 数据源预算
 
-| API | 限额 | 日均用量 | 主要用途 |
-|-----|------|---------|---------|
-| yfinance | 无限 | ~30 次 | OHLCV / 指数 / 新闻 |
-| Alpha Vantage | 500/天 | ~5 次 | 财报（季度缓存） |
-| Finnhub | 60/分钟 | ~20 次 | 新闻情绪 / 盈利日历 |
-| FRED | 无限 | ~15 次 | Fed利率 / CPI / VIX |
-
----
-
-## 开发阶段
-
-| Phase | 内容 | 状态 |
-|-------|------|------|
-| P0 | 骨架 + config + logger | ✅ 完成 |
-| P1 | 数据层 4 源 + SQLite | ✅ 完成 |
-| P2 | 量化信号层（fundamental/trend/momentum/relative/volume） | ✅ 完成 |
-| P3 | 宏观信号层（VIX制度 + 桶强度） | 待开始 |
-| P4 | **缠论信号层**（等用户提供精髓） | 阻塞中 |
-| P5 | 决策层（双引擎打分 + 风控） | 待开始 |
-| P6 | 报告层 + main.py 端到端 | 待开始 |
-| P7+ | LightGBM 增强 / LLM 润色（可选） | 规划中 |
+| API | Limit | Avg Daily Calls | Primary Use | API | 限额 | 日均用量 | 主要用途 |
+|-----|-------|-----------------|------------|-----|------|---------|---------|
+| yfinance | Unlimited | ~30 | OHLCV / Indices / News | yfinance | 无限 | ~30 次 | OHLCV / 指数 / 新闻 |
+| Alpha Vantage | 500/day | ~5 | Financials (quarterly cache) | Alpha Vantage | 500/天 | ~5 次 | 财报（季度缓存） |
+| Finnhub | 60/min | ~20 | News sentiment / Earnings calendar | Finnhub | 60/分钟 | ~20 次 | 新闻情绪 / 盈利日历 |
+| FRED | Unlimited | ~15 | Fed rates / CPI / VIX | FRED | 无限 | ~15 次 | Fed利率 / CPI / VIX |
 
 ---
 
-## 无前视偏差规则
+## Development Phases | 开发阶段
 
-- **财报**：datadate + 2 个月延迟（Q1→06-01, Q2→09-01, Q3→12-01, Q4→次年 03-01）
-- **量化因子**：仅用 close[t-1]，当日收盘后计算，隔日应用
-- **缠论**：笔/中枢完成确认后才触发信号，不预测进行中结构
+| Phase | Content | Status | 阶段 | 内容 | 状态 |
+|-------|---------|--------|------|------|------|
+| P0 | Framework + config + logger | ✅ Complete | P0 | 骨架 + config + logger | ✅ 完成 |
+| P1 | Data layer 4 sources + SQLite | ✅ Complete | P1 | 数据层 4 源 + SQLite | ✅ 完成 |
+| P2 | Quant signals (fund/trend/mom/rel/vol) | ✅ Complete | P2 | 量化信号层（fundamental/trend/momentum/relative/volume） | ✅ 完成 |
+| P3 | Macro signals (VIX regime + bucket strength) | ⏳ In Progress | P3 | 宏观信号层（VIX制度 + 桶强度） | ⏳ 进行中 |
+| P4 | **Chan signals** (fractal/stroke/pivot/trade points) | ✅ Complete | P4 | **缠论信号层**（分型/笔/中枢/买卖点） | ✅ 完成 |
+| P5 | Decision layer (dual-engine scoring + risk control) | ⏳ In Progress | P5 | 决策层（双引擎打分 + 风控） | ⏳ 进行中 |
+| P6 | Report layer + main.py end-to-end | ✅ Complete | P6 | 报告层 + main.py 端到端 | ✅ 完成 |
+| P7+ | LightGBM enhancement / LLM polish (optional) | 📋 Planned | P7+ | LightGBM 增强 / LLM 润色（可选） | 📋 规划中 |
+
+---
+
+## No Forward-Bias Rules | 无前视偏差规则
+
+- **Financials | 财报**: datadate + 2-month lag (Q1→06-01, Q2→09-01, Q3→12-01, Q4→next year 03-01)
+  
+  **财报**：datadate + 2 个月延迟（Q1→06-01, Q2→09-01, Q3→12-01, Q4→次年 03-01）
+
+- **Quant Factors | 量化因子**: Use only close[t-1]; compute after market close; apply next day
+  
+  **量化因子**：仅用 close[t-1]，当日收盘后计算，隔日应用
+
+- **Chan Signals | 缠论**: Trigger only after stroke/pivot confirmation; do not anticipate in-progress structures
+  
+  **缠论**：笔/中枢完成确认后才触发信号，不预测进行中结构
