@@ -39,6 +39,7 @@ def apply_risk_overlay(
     macro:              MacroSignalResult,
     current_price:      float,
     divergence_applied: bool,
+    chan_macro_state:   str = "neutral",
 ) -> RiskOverlay:
     flags: List[str] = []
     vix_regime     = macro.vix_regime
@@ -68,6 +69,12 @@ def apply_risk_overlay(
     # ── 风险标签 ──────────────────────────────────────────────
     if divergence_applied:
         flags.append("CHAN_QUANT_DIV: 缠论↑量化↓，结构信号优先")
+
+    # 缠论↔宏观并行一致性（macro_s 已计入得分，此处仅标记不重复扣仓）
+    if chan_macro_state == "resonance":
+        flags.append("CHAN_MACRO_RESONANCE: 缠论×宏观双主轴共振，信号更可信")
+    elif chan_macro_state == "headwind":
+        flags.append("MACRO_HEADWIND: 缠论看多但宏观环境敌对，谨慎建仓")
 
     if chan.weekly_trend == "down" and final_score > 0:
         flags.append("WEEKLY_DOWN: 周线下跌，多头信号已折半")

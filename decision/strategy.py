@@ -63,6 +63,7 @@ def make_decision(
         macro=macro,
         current_price=current_price,
         divergence_applied=scored.divergence_applied,
+        chan_macro_state=scored.chan_macro_state,
     )
 
     return StockDecision(
