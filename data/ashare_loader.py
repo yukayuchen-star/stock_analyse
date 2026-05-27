@@ -11,6 +11,7 @@ CSV 列：symbol,date,open,high,low,close,volume,amount,
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Dict
 
@@ -33,6 +34,12 @@ INDICATOR_COLS = [
     "rsi_6", "rsi_12", "rsi_24",
     "boll_upper", "boll_mid", "boll_lower", "cci",
 ]
+
+
+def normalize_code(stem: str) -> str:
+    """从文件名提取 6 位股票代码，剥离交易所前后缀（如 sz300750 / 600519.SH）。"""
+    m = re.search(r"\d{6}", stem)
+    return m.group(0) if m else stem
 
 
 def classify_board(code: str) -> str:
@@ -59,8 +66,10 @@ def load_one_csv(path: Path) -> pd.DataFrame | None:
         logger.warning(f"[AShareLoader] 读取失败 {path.name}: {exc}")
         return None
 
-    if "date" not in df.columns or "close" not in df.columns:
-        logger.warning(f"[AShareLoader] {path.name} 缺 date/close 列，跳过")
+    required = {"date", "open", "high", "low", "close"}
+    missing = required - set(df.columns)
+    if missing:
+        logger.warning(f"[AShareLoader] {path.name} 缺列 {sorted(missing)}，跳过")
         return None
 
     df = df.rename(columns=_RENAME)
@@ -102,7 +111,7 @@ def load_ashare_prices(
     out: Dict[str, pd.DataFrame] = {}
     skipped = 0
     for f in files:
-        code = f.stem
+        code = normalize_code(f.stem)
         df = load_one_csv(f)
         if df is None:
             skipped += 1

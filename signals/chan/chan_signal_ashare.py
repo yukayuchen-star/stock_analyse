@@ -75,7 +75,8 @@ def _trend_strength(df: pd.DataFrame) -> float:
     pos = 0.5
     if up is not None and lo is not None and up > lo:
         pos = float(np.clip((close - lo) / (up - lo), 0.0, 1.0))
-    cci = float(last.get("cci", 0.0) or 0.0)
+    cci_raw = last.get("cci", 0.0)
+    cci = float(cci_raw) if pd.notna(cci_raw) else 0.0
     cci_s = float(np.clip(cci / 200.0, -1.0, 1.0)) * 0.5 + 0.5   # → 0~1
     return float(0.5 * pos + 0.5 * cci_s)
 
@@ -129,8 +130,9 @@ def compute_chan_signal_ashare(
         weekly = _weekly_trend(df)
 
         last     = strokes[-1]
-        cutoff   = df.index[-1] - pd.Timedelta(days=15)
-        is_fresh = last.end_date >= cutoff
+        # 新鲜度按交易日计（~12 根，约等于原 15 日历日），避免春节等长假被误判为过期
+        fresh_floor = df.index[-12] if len(df) >= 12 else df.index[0]
+        is_fresh = last.end_date >= fresh_floor
         fractal_stop = _fractal_stopped(last, pbars, df) if is_fresh else False
 
         buy_type = sell_type = "none"
