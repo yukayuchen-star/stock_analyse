@@ -28,6 +28,10 @@ from signals.chan.chan_signal import (
     _fractal_stopped, _weekly_trend, _calc_stop_and_r, _macd_hist,
 )
 
+# 三买中枢新鲜度阈值（交易日）：三买须是突破后的"及时回踩"，
+# 中枢末笔距今超过此值即视为旧中枢残影，门控丢弃（仅作用于实盘选股）。
+STALE_PIVOT_TD = 25
+
 
 # ── MACD 柱：优先用预计算列 ──────────────────────────────────────
 
@@ -153,14 +157,30 @@ def compute_chan_signal_ashare(
         # ── 牛短熊长保守门控（仅作用于实盘选股）──────────────
         gate_note = ""
         if buy_type == "b1":
-            # 一买严格门控：周线非向下 且 KDJ/RSI 底背离确认，二者缺一即弃
+            # 一买严格门控（一买须在下跌趋势末端，价格处于相对低位）：
+            #  (1) 周线非向下 且 KDJ/RSI 底背离确认，二者缺一即弃；
+            #  (2) 上涨中继护栏：周线向上且现价已在中枢 ZG 之上 → 实为上涨回调
+            #      而非下跌末端一买（_detect_buy 的 b1 兜底分支无价格位置约束），弃。
+            zg_now = latest_pivot.zg if latest_pivot else None
             if weekly == "down" or not bdiv:
                 gate_note = "b1被门控(周线向下/无底背离)"
+                buy_type, raw_score, diverge = "none", 0.0, False
+            elif weekly == "up" and zg_now is not None and float(close.iloc[-1]) > zg_now:
+                gate_note = "b1被门控(上涨中继:周线up且现价>中枢ZG，非下跌末端一买)"
                 buy_type, raw_score, diverge = "none", 0.0, False
         if buy_type == "b2" and weekly == "down":
             gate_note = "b2被门控(周线向下)"
             buy_type, raw_score = "none", 0.0
-        # b3（突破中枢）即便周线偏弱也允许，但弱周线下削分
+        # b3（突破中枢）即便周线偏弱也允许，但弱周线下削分；
+        # 须中枢新鲜——三买是突破后的"及时回踩"，旧中枢残影/价格已远走不算
+        if buy_type == "b3" and latest_pivot is not None:
+            pivot_end = max(s.end_date for s in latest_pivot.strokes)
+            pivot_floor = (df.index[-STALE_PIVOT_TD]
+                           if len(df) >= STALE_PIVOT_TD else df.index[0])
+            if pivot_end < pivot_floor:
+                gap = int((df.index > pivot_end).sum())
+                gate_note = f"b3被门控(中枢陈旧:末笔距今{gap}TD>{STALE_PIVOT_TD})"
+                buy_type, raw_score = "none", 0.0
 
         # ── 评分修正 ──────────────────────────────────────────
         score = raw_score
