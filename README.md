@@ -153,56 +153,95 @@ Chan ↓, Quant ↑ → Divergence, await chan confirmation
 
 ---
 
+## A-Share Chan System | A股缠论系统
+
+Independent A-share track that reuses the market-agnostic Chan engine (fractal→stroke→pivot→trade points). Selection and backtest entries are separate from the US side.
+独立 A 股轴，复用市场无关的缠论结构引擎（分型→笔→中枢→买卖点），选股与回测入口与美股侧分离。
+
+```bash
+python mainA.py               # A-share selection → output/ashare/{date}/ | A股选股
+python run_ashare_backtest.py # Chan win-rate by b1/b2/b3 | 缠论分类型回测胜率
+```
+
+| Aspect | US (main.py) | A-Share (mainA.py) | 维度 | 美股 | A股 |
+|--------|--------------|--------------------|------|------|-----|
+| Data | yfinance live | local CSV `processed_stocks_selected/` | 数据 | yfinance 实时 | 本地 CSV |
+| Axes | Chan×Macro×Quant | Chan-only (no macro/quant data) | 轴 | 三轴 | 纯缠论 |
+| MACD divergence | recomputed | precomputed `macd` column | 背驰 | 重算 | 用预计算列 |
+| Indicators | — | KDJ/RSI divergence + CCI/BOLL strength (confirm only) | 指标 | — | KDJ/RSI背离+CCI/BOLL力度（仅确认） |
+| Gating | VIX 4-tier | conservative: b2/b3 priority, b1 strictly gated | 门控 | VIX四档 | 保守：二/三买为主，一买严格门控 |
+| Limits | none | board ±10/20/30% modeled in backtest | 涨跌停 | 无 | 回测按板块建模 |
+| Risk | — | Livermore 2%: position = RISK_BUDGET / R | 风控 | — | 利弗莫尔2%：仓位=风险预算/R |
+
+**Boards | 板块**: `300/301`→创业板(±20%), `688/689`→科创板(±20%), `8/4`→北交所(±30%), else 主板(±10%). Code is normalized to the 6-digit number from the filename (strips `sh/sz` prefixes).
+
+**Core principle | 核心原则**: 缠论结构（走势形态+中枢）为信号本体；MACD/KDJ/RSI/CCI/BOLL 仅调整 score/confidence 与门控，**绝不独立产生买卖点**。
+
+---
+
 ## Directory Structure | 目录结构
 
 ```
 stock_analyse/
-├── main.py
+├── main.py                        # 美股选股入口 | US selection entry
+├── mainA.py                       # A股选股入口 | A-share selection entry
+├── run_ml_backtest.py             # 美股 ML 回测 | US ML backtest
+├── run_ashare_backtest.py         # A股缠论历史回测 | A-share Chan backtest
 ├── config/
 │   ├── settings.py
-│   └── stocks.py
+│   ├── stocks.py                  # 美股股票池 | US pool
+│   ├── stocks_ashare.py           # A股回测/风控参数 | A-share params
+│   └── pool_manager.py
 ├── data/
-│   ├── base.py              # DataSource Protocol
+│   ├── base.py                    # DataSource Protocol
 │   ├── yfinance_source.py
 │   ├── alpha_vantage_source.py
 │   ├── finnhub_source.py
 │   ├── fred_source.py
+│   ├── universe.py
 │   ├── cache.py
-│   └── pipeline.py
+│   ├── pipeline.py
+│   └── ashare_loader.py           # A股本地CSV装载 | A-share CSV loader
 ├── signals/
-│   ├── chan/                 # 缠论择时引擎
-│   │   ├── fractal.py       # 分型
-│   │   ├── stroke.py        # 笔
-│   │   ├── segment.py       # 线段
-│   │   ├── pivot.py         # 中枢
-│   │   ├── trade_point.py   # 买卖点
-│   │   ├── multi_level.py   # 多级别共振
-│   │   └── chan_signal.py   # → ChanSignalResult
-│   ├── quant/               # 量化选股引擎（原 technical/）
-│   │   ├── trend.py         # 趋势因子：SMA/EMA/ADX
-│   │   ├── momentum.py      # 动量因子：ROC/MACD/RSI/KAMA
-│   │   ├── relative.py      # 相对强度：vs QQQ / 桶内 Z-score
-│   │   ├── volume.py        # 量价因子：OBV/VWMA
-│   │   └── factor_engine.py # → QuantSignalResult
-│   └── macro/               # 宏观风险门控
-│       ├── regime.py        # VIX 四档制度
+│   ├── screening.py
+│   ├── chan/                      # 缠论引擎（市场无关核心）| Chan engine (core)
+│   │   ├── fractal.py             # 分型
+│   │   ├── stroke.py              # 笔
+│   │   ├── pivot.py               # 中枢
+│   │   ├── chan_signal.py         # 美股缠论 → ChanSignalResult
+│   │   └── chan_signal_ashare.py  # A股缠论（预计算MACD+指标确认+保守门控）
+│   ├── quant/                     # 量化选股引擎
+│   │   ├── fundamental.py         # 基本面因子
+│   │   ├── trend.py               # 趋势因子：SMA/EMA/ADX
+│   │   ├── momentum.py            # 动量因子：ROC/MACD/RSI/KAMA
+│   │   ├── relative.py            # 相对强度：vs QQQ / 桶内 Z-score
+│   │   ├── volume.py              # 量价因子：OBV/VWMA
+│   │   └── factor_engine.py       # → QuantSignalResult
+│   └── macro/                     # 宏观风险门控
+│       ├── regime.py              # VIX 四档制度
+│       ├── external_factors.py    # 利率/油价/美元/通胀异动
 │       ├── sector_strength.py
-│       └── macro_signal.py  # → MacroSignalResult
+│       └── macro_signal.py        # → MacroSignalResult
 ├── decision/
-│   ├── scorer.py            # 双引擎共振打分
-│   ├── risk_overlay.py      # 仓位 + 止损
-│   ├── rating.py            # 5 档评级
-│   └── strategy.py          # → StockDecision
+│   ├── scorer.py                  # 双主轴共振打分
+│   ├── risk_overlay.py            # 仓位 + 止损
+│   ├── rating.py                  # 5 档评级
+│   ├── strategy.py                # 美股 → StockDecision
+│   └── strategy_ashare.py         # A股纯缠论 → AShareDecision
+├── backtest/
+│   ├── engine.py                  # 美股回测撮合
+│   ├── engine_ashare.py           # A股回测（涨跌停/跳空/A股调参）
+│   ├── ml_backtest.py             # ML 回测（去泄漏）
+│   ├── forward_tracker.py         # 前向跟踪
+│   └── report.py
 ├── report/
-│   ├── templates.py
-│   ├── stock_report.py
-│   └── daily_report.py
+│   └── report_writer.py
 ├── utils/
 │   ├── logger.py
 │   ├── time_utils.py
-│   └── exceptions.py
-├── output/                  # git ignored
-├── cache/                   # git ignored
+│   └── housekeeping.py
+├── output/                        # git ignored
+├── cache/                         # git ignored
 └── logs/
 ```
 

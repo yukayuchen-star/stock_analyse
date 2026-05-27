@@ -4,7 +4,7 @@ A 股缠论回测引擎
 以 backtest/engine.py 为蓝本，撮合改为 A 股化：
   - 涨跌停建模：一字涨停无法买入（跳过入场）；一字跌停锁死当日无法止损（顺延）。
   - 跳空穿越：止损成交价 = min(止损价, 当日开盘)；止盈遇跳空高开 = max(止盈价, 开盘)。
-  - 止损止盈按 A 股波动调参（SL_PCT≈9%，TP 2:1）。
+  - 止损按板块涨跌停缩放（sl_pct_for_board：主板 9%/创业板·科创 18%/北交所 27%），TP 2:1。
   - 预热 WARMUP_BARS=120（每股仅 ~360TD，换取更长回测窗口）。
 
 信号源：extract_chan_events_ashare（背驰用预计算 MACD，无前视）。
@@ -21,7 +21,9 @@ from loguru import logger
 from signals.chan.chan_signal_ashare import extract_chan_events_ashare
 from signals.chan.chan_signal import ChanEvent
 from backtest.engine import Trade, BacktestResult, _make_trade, _compute_metrics
-from config.stocks_ashare import SL_PCT, TP_MULT, WARMUP_BARS, MIN_BACKTEST_BARS
+from config.stocks_ashare import (
+    TP_MULT, WARMUP_BARS, MIN_BACKTEST_BARS, sl_pct_for_board,
+)
 
 _LOCK_EPS = 0.005   # 当日振幅 <0.5% 视为一字锁死（涨跌停无法成交）
 
@@ -49,8 +51,9 @@ def _scan_exit(window: pd.DataFrame, sl: float, tp: float, locked_down) -> Optio
     return None
 
 
-def _simulate_trades_ashare(df: pd.DataFrame, events: List[ChanEvent]) -> List[Trade]:
-    """A 股撮合：含涨跌停/跳空约束。仅做多。"""
+def _simulate_trades_ashare(df: pd.DataFrame, events: List[ChanEvent],
+                            sl_pct: float = 0.09) -> List[Trade]:
+    """A 股撮合：含涨跌停/跳空约束。止损按板块缩放（sl_pct）。仅做多。"""
     locked_up, locked_down = _lock_flags(df)
     trades: List[Trade] = []
     in_pos  = False
@@ -77,8 +80,8 @@ def _simulate_trades_ashare(df: pd.DataFrame, events: List[ChanEvent]) -> List[T
                 if (ev.signal_type.startswith("b") and ev.date > hit_date
                         and _can_enter(ev.date)):
                     in_pos, e_date, e_sig, e_price = True, ev.date, ev.signal_type, ev.price
-                    sl = e_price * (1 - SL_PCT)
-                    tp = e_price * (1 + SL_PCT * TP_MULT)
+                    sl = e_price * (1 - sl_pct)
+                    tp = e_price * (1 + sl_pct * TP_MULT)
 
             elif ev.signal_type.startswith("s") and ev.date > e_date:
                 trades.append(_make_trade(e_date, ev.date, e_sig,
@@ -87,8 +90,8 @@ def _simulate_trades_ashare(df: pd.DataFrame, events: List[ChanEvent]) -> List[T
 
         elif ev.signal_type.startswith("b") and _can_enter(ev.date):
             in_pos, e_date, e_sig, e_price = True, ev.date, ev.signal_type, ev.price
-            sl = e_price * (1 - SL_PCT)
-            tp = e_price * (1 + SL_PCT * TP_MULT)
+            sl = e_price * (1 - sl_pct)
+            tp = e_price * (1 + sl_pct * TP_MULT)
 
     # 收尾：仍持仓 → 先扫描入场至末日是否触及 SL/TP，未触及才以末日收盘出场
     if in_pos and e_date is not None and not df.empty:
@@ -123,7 +126,9 @@ def run_backtest_ashare(code: str, df: pd.DataFrame) -> BacktestResult:
         base.reasoning = f"回测区间无缠论信号({len(backtest_df)}根){warn}"
         return base
 
-    trades  = _simulate_trades_ashare(backtest_df, events)
+    board   = df.attrs.get("board", "main")
+    sl_pct  = sl_pct_for_board(board)
+    trades  = _simulate_trades_ashare(backtest_df, events, sl_pct)
     metrics = _compute_metrics(trades, backtest_df)
     if not metrics:
         base.period_start, base.period_end = backtest_start, df.index[-1]
