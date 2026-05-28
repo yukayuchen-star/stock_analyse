@@ -54,7 +54,8 @@ def _rating(chan: ChanSignalResult) -> str:
     if bp in ("b2", "b3") and chan.score >= BUY_SCORE_MIN and not too_far:
         return "Buy"
     if bp and chan.score > WATCH_SCORE_MIN:
-        return "Watch"            # 含被削分的 b1 / 弱 b2b3 / 止损过远的 b3
+        return "Watch"            # 含被削分的 b1 / 弱 b2b3 / 止损过远的 b3 / 类二买 lb2
+                                  # lb2 回测仅 42% 胜率 → 只观察不自动买（Watch-only）
     if chan.sell_point_type:
         return "Avoid"
     return "Hold"

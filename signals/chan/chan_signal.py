@@ -238,7 +238,8 @@ def _calc_stop_and_r(
     stop: Optional[float] = None
     if point_type == "b1" or point_type == "b2":
         stop = last_stroke.low * (1 - _STOP_BUFFER)
-    elif point_type == "b3" and pivot is not None:
+    elif point_type in ("b3", "lb2") and pivot is not None:
+        # lb2(类二买)与 b3 同：突破失败跌回中枢，止损设在中枢上沿 ZG 下方
         stop = pivot.zg * (1 - _STOP_BUFFER)
     elif point_type == "s1" or point_type == "s2":
         stop = last_stroke.high * (1 + _STOP_BUFFER)

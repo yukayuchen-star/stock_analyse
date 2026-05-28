@@ -60,8 +60,16 @@ BOARD_POSITION_CAP = {
 }
 
 # ── 评级阈值 ────────────────────────────────────────────────────
-BUY_SCORE_MIN   = 0.50   # ≥ 此分且为 b2/b3 → Buy
+BUY_SCORE_MIN   = 0.50   # ≥ 此分且为 b2/b3/lb2 → Buy
 WATCH_SCORE_MIN = 0.01   # > 0 且有买点 → Watch
+
+# ── 类二买（lb2）：上涨中枢震荡「极度缩量 + BOLL收口 + 快速突破ZG」──
+# 缠论右侧买点，捕捉左侧 cascade(b1/b2/b3) 结构上发不出的强势突破。
+PSEUDO_B2_SCORE     = 0.75            # 基础分（强势右侧，与二买同档）
+PSEUDO_B2_BREAK_K   = 3               # 近 K 根收盘上穿 ZG 视为新鲜突破
+PSEUDO_B2_DRYUP_WIN = 10              # 极度缩量/收口观察窗口（突破前 ~N 交易日）
+PSEUDO_B2_POS_X     = {"main": 0.20, "chinext": 0.25, "star": 0.25, "bse": 0.30}
+PSEUDO_B2_PUSH_PCT  = {"main": 0.03, "chinext": 0.05, "star": 0.05, "bse": 0.05}
 
 # ── 风控（缠论.md 引用利弗莫尔 2% 风险法则）─────────────────────
 RISK_BUDGET = 0.02   # 单笔最大风险占比（仓位 = RISK_BUDGET / R）
