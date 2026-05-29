@@ -22,6 +22,7 @@ from utils.time_utils import today_str
 from data.ashare_loader import load_ashare_prices, board_limit
 from signals.chan.chan_signal_ashare import compute_chan_signal_ashare
 from decision.strategy_ashare import make_ashare_decision, AShareDecision
+from decision.hysteresis_ashare import apply_hysteresis_ashare
 
 _BOARD_CN = {"main": "主板", "chinext": "创业板", "star": "科创板", "bse": "北交所"}
 
@@ -160,6 +161,9 @@ def main() -> None:
     if not decisions:
         logger.error("无可分析个股")
         return
+
+    # B 迟滞：抑制"昨 Buy→今 Avoid"隔夜翻转（需连续确认才清仓）
+    apply_hysteresis_ashare(decisions, date_str)
 
     out_dir = Path("output") / "ashare" / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
