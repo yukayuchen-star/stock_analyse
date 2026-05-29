@@ -321,12 +321,15 @@ def _detect_buy(
                 recent_max > 0):
             return "b2", 0.75, False
 
-    # ── B1：下跌笔MACD面积背驰（当前面积 < 前一次 × 0.8）─────
+    # ── B1：下跌趋势背驰 = 创出新低(延续下跌的最后一段) 但 MACD 面积反而更小 ──
+    # 缠论精髓：背驰必须"创新极值 + 力度衰竭"，仅面积更小而未创新低只是弱回调，不算背驰。
     down_strokes = [s for s in strokes if s.direction == "down"]
     if len(down_strokes) >= 2 and last.direction == "down":
-        curr_area = _stroke_area(last,             df, hist)
-        prev_area = _stroke_area(down_strokes[-2], df, hist)
-        if prev_area > 1e-6 and curr_area < prev_area * 0.8:
+        prev_down = down_strokes[-2]
+        curr_area = _stroke_area(last,      df, hist)
+        prev_area = _stroke_area(prev_down, df, hist)
+        if (last.low < prev_down.low
+                and prev_area > 1e-6 and curr_area < prev_area * 0.8):
             return "b1", 0.50, True
 
     return "none", 0.0, False
@@ -355,12 +358,14 @@ def _detect_sell(
             if price <= pivot.mid:
                 return "s2", -0.65, False
 
-    # ── S1：上升笔MACD面积背驰 ────────────────────────────
+    # ── S1：上涨趋势背驰 = 创出新高(延续上涨的最后一段) 但 MACD 面积反而更小 ──
     up_strokes = [s for s in strokes if s.direction == "up"]
     if len(up_strokes) >= 2 and last.direction == "up":
-        curr_area = _stroke_area(last,          df, hist)
-        prev_area = _stroke_area(up_strokes[-2], df, hist)
-        if prev_area > 1e-6 and curr_area < prev_area * 0.8:
+        prev_up   = up_strokes[-2]
+        curr_area = _stroke_area(last,    df, hist)
+        prev_area = _stroke_area(prev_up, df, hist)
+        if (last.high > prev_up.high
+                and prev_area > 1e-6 and curr_area < prev_area * 0.8):
             return "s1", -0.50, True
 
     return "none", 0.0, False

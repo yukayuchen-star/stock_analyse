@@ -26,6 +26,7 @@ from signals.chan.chan_signal import (
     ChanSignalResult, ChanEvent,
     _detect_buy, _detect_sell, _classify_trend, _trend_weight,
     _fractal_stopped, _weekly_trend, _calc_stop_and_r, _macd_hist,
+    STROKE_CONFIRM_BARS, HIGH_VOL_PCT, HIGH_VOL_EXTRA_CONFIRM,
 )
 from config.stocks_ashare import (
     PSEUDO_B2_SCORE, PSEUDO_B2_BREAK_K, PSEUDO_B2_DRYUP_WIN,
@@ -195,12 +196,21 @@ def compute_chan_signal_ashare(
         # 新鲜度按交易日计（~12 根，约等于原 15 日历日），避免春节等长假被误判为过期
         fresh_floor = df.index[-12] if len(df) >= 12 else df.index[0]
         is_fresh = last.end_date >= fresh_floor
+
+        # C' 波动率：近20日均振幅；高波动名右端笔更不稳，要求更多定笔确认。
+        rng = ((df["High"] - df["Low"]) / df["Close"].replace(0, np.nan)).tail(20)
+        atr_pct = float(rng.mean()) if rng.notna().any() else 0.0
+        # A 定笔确认：末笔终点分型须再过 confirm_bars 根处理K才"定笔"，否则右端可能被新K重画，不发信号。
+        confirm_bars     = STROKE_CONFIRM_BARS + (HIGH_VOL_EXTRA_CONFIRM if atr_pct >= HIGH_VOL_PCT else 0)
+        bars_since_end   = (len(pbars) - 1) - last.end.pbar_idx
+        stroke_confirmed = bars_since_end >= confirm_bars
+
         fractal_stop = _fractal_stopped(last, pbars, df) if is_fresh else False
 
         buy_type = sell_type = "none"
         raw_score = 0.0
         diverge   = False
-        if is_fresh and fractal_stop:
+        if is_fresh and fractal_stop and stroke_confirmed:
             buy_type, raw_score, diverge = _detect_buy(
                 strokes, latest_pivot, hist, df, close)
             if buy_type == "none":
@@ -229,15 +239,16 @@ def compute_chan_signal_ashare(
         if buy_type == "b2" and weekly == "down":
             gate_note = "b2被门控(周线向下)"
             buy_type, raw_score = "none", 0.0
-        # b3（突破中枢）即便周线偏弱也允许，但弱周线下削分；
-        # 须中枢新鲜——三买是突破后的"及时回踩"，旧中枢残影/价格已远走不算
-        if buy_type == "b3" and latest_pivot is not None:
+        # 中枢新鲜度（b2/b3 都锚定中枢；中枢末笔距今 >STALE_PIVOT_TD 即价格早已离开的旧结构，弃）。
+        # b3 是突破后"及时回踩"，b2 是中枢下沿回踩——都不应挂在陈旧中枢上。
+        # (b1 用笔低点不依赖中枢、b3 即便弱周线也允许只削分，故此处只管新鲜度。)
+        if buy_type in ("b2", "b3") and latest_pivot is not None:
             pivot_end = max(s.end_date for s in latest_pivot.strokes)
             pivot_floor = (df.index[-STALE_PIVOT_TD]
                            if len(df) >= STALE_PIVOT_TD else df.index[0])
             if pivot_end < pivot_floor:
                 gap = int((df.index > pivot_end).sum())
-                gate_note = f"b3被门控(中枢陈旧:末笔距今{gap}TD>{STALE_PIVOT_TD})"
+                gate_note = f"{buy_type}被门控(中枢陈旧:末笔距今{gap}TD>{STALE_PIVOT_TD})"
                 buy_type, raw_score = "none", 0.0
 
         # ── 右侧路径：左侧买卖点(含被门控掉的 b1/b3)用尽后，检测类二买 ──
@@ -290,10 +301,13 @@ def compute_chan_signal_ashare(
         point = active_pt if active_pt != "none" else "neutral"
         conf_tag = (f"底背离={'✓' if bdiv else '×'} 力度={strength:.2f}"
                     f" 收口={'✓' if squeeze else '×'}")
+        confirm_tag = ("定笔✓" if stroke_confirmed
+                       else f"未定笔(右端{bars_since_end}/{confirm_bars})")
+        vol_tag = f" 高波动{atr_pct:.0%}" if atr_pct >= HIGH_VOL_PCT else ""
         reasoning = (
             f"[{board}] 笔={len(strokes)} {pstr} 周线={weekly} {trend_type} "
             f"末笔={last.direction}{'✓' if is_fresh else '×'}"
-            f"{'停顿✓' if fractal_stop else '停顿×'} → {point} "
+            f"{'停顿✓' if fractal_stop else '停顿×'} {confirm_tag}{vol_tag} → {point} "
             f"{conf_tag} res={resonance} score={score:+.2f}"
             + (f" R={r_ratio:.3f}" if r_ratio else "")
             + (f" | {gate_note}" if gate_note else "")
@@ -318,6 +332,8 @@ def compute_chan_signal_ashare(
             trend_type=trend_type,
             pivot_total=len(all_pivots),
             fractal_stop=fractal_stop,
+            stroke_confirmed=stroke_confirmed,
+            atr_pct=atr_pct,
             stop_loss=stop_loss,
             r_ratio=r_ratio,
             score=score,
