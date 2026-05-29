@@ -33,6 +33,7 @@ class AShareDecision:
 
     current_price:     float = 0.0
     entry_price_range: Tuple[float, float] = (0.0, 0.0)
+    chase_ceiling:     float = 0.0   # 不追上限：使 R 达 R_MAX 的价位（=止损/(1−R_MAX)），高于此则放弃
     stop_loss:         float = 0.0
     take_profit:       float = 0.0
     r_ratio:           Optional[float] = None
@@ -91,12 +92,20 @@ def make_ashare_decision(
     entry_lo = round(price * 0.99, 4)
     entry_hi = round(price * 1.01, 4)
 
+    # ── 次日执行（日线层面最精确）──────────────────────────────
+    # 信号已"停顿✓"确认 → 现价即可市价买；不追上限 = R 达 R_MAX 的价位 = 止损/(1−R_MAX)，
+    # 现价或次日高开高于它则 R>15%（追高），放弃。想优化 R 可在现价下方至止损上方挂 limit。
+    chase_ceiling = 0.0
+    if rating in ("Buy", "Watch") and stop > 0:
+        chase_ceiling = round(stop / (1 - R_MAX), 4)
+
     return AShareDecision(
         code=code, board=board,
         rating=rating, score=chan.score, confidence=chan.confidence,
         buy_point=chan.buy_point_type, sell_point=chan.sell_point_type,
         current_price=price,
         entry_price_range=(entry_lo, entry_hi),
+        chase_ceiling=chase_ceiling,
         stop_loss=round(stop, 4) if stop else 0.0,
         take_profit=take_profit,
         r_ratio=chan.r_ratio,

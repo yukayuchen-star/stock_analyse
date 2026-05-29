@@ -58,6 +58,7 @@ def _decisions_to_rows(decisions: List[AShareDecision]) -> List[dict]:
             "现价": round(d.current_price, 2),
             "中枢下沿": round(zd, 2) if zd else None,
             "中枢上沿": round(zg, 2) if zg else None,
+            "不追上限": d.chase_ceiling or None,
             "止损": d.stop_loss or None,
             "止盈": d.take_profit or None,
             "R比率": d.r_ratio,
@@ -111,6 +112,27 @@ def build_report(decisions: List[AShareDecision], date_str: str) -> str:
         return out
 
     lines += _table("买入候选（Buy）", buys)
+
+    # 次日执行计划（仅 Buy）：把"现价附近买"换成可挂单的确定价位
+    if buys:
+        lines += [
+            "## 次日执行计划（日线层面最精确）",
+            "",
+            "> 信号已「停顿✓」确认 → 现价即可市价买；想优化 R 可在「现价下方至止损上方」挂 limit。",
+            "> **不追上限**=R 达 15% 的价位(止损/0.85)，现价或次日高开高于它则放弃（追高）。",
+            "> 止损/第一止盈/仓位均为确定价位，非区间。",
+            "",
+            "| 代码 | 买点 | 现价 | 不追上限 | 止损 | 第一止盈 | 仓位 |",
+            "|------|------|------|---------|------|---------|------|",
+        ]
+        for d in buys:
+            pos = f"{d.suggested_position:.0%}" if d.suggested_position else "—"
+            lines.append(
+                f"| {d.code} | {d.buy_point or '—'} | {d.current_price:.2f} "
+                f"| {d.chase_ceiling or '—'} | {d.stop_loss or '—'} "
+                f"| {d.take_profit or '—'} | {pos} |")
+        lines += [""]
+
     lines += _table("观察区（Watch）", watch)
 
     lines += [
