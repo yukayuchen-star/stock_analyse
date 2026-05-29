@@ -79,6 +79,9 @@ def apply_risk_overlay(
     if chan.weekly_trend == "down" and final_score > 0:
         flags.append("WEEKLY_DOWN: 周线下跌，多头信号已折半")
 
+    if getattr(chan, "atr_pct", 0.0) >= 0.06:
+        flags.append(f"HIGH_VOL: 日均振幅{chan.atr_pct:.0%}，日线结构噪声大、信号可信度低")
+
     # ── 止损/止盈 ─────────────────────────────────────────────
     stop_pct = _STOP_PCT.get(vix_regime, 0.08)
     if final_score > 0 and current_price > 0:

@@ -19,6 +19,7 @@ from signals.screening           import (
     ScreeningCandidate, screen_for_adds, screen_for_removes,
 )
 from decision.strategy           import make_decision, StockDecision
+from decision.hysteresis         import apply_hysteresis
 from report.report_writer        import write_all_reports
 from backtest.engine             import run_all_backtests
 from backtest.report             import write_backtest_report
@@ -343,6 +344,9 @@ def run() -> None:
             prices=prices,
         )
         decisions[ticker] = d
+
+    # ── B 迟滞：抑制"昨多→今出"隔夜翻转（需连续确认才清仓）──
+    apply_hysteresis(decisions, date_str)
 
     logger.info("── P5 综合评级排行 ──")
     for d in sorted(decisions.values(), key=lambda x: x.final_score, reverse=True):

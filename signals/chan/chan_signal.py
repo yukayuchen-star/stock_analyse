@@ -26,6 +26,14 @@ from signals.chan.stroke  import build_strokes, Stroke
 from signals.chan.pivot   import find_latest_pivot, build_all_pivots, Pivot
 
 
+# ── 右端稳定性参数（A 定笔确认 + C' 波动率护栏）──────────────────
+# A：末笔终点分型需再过 STROKE_CONFIRM_BARS 根处理K线才算"定笔"，否则右端可能重画，不发信号。
+STROKE_CONFIRM_BARS    = 2
+# C'：近20日均振幅 ≥ HIGH_VOL_PCT 视为高波动名，额外要求 HIGH_VOL_EXTRA_CONFIRM 根定笔确认 + 标记。
+HIGH_VOL_PCT           = 0.06
+HIGH_VOL_EXTRA_CONFIRM = 2
+
+
 # ── 结果数据类 ────────────────────────────────────────────────
 
 @dataclass
@@ -60,6 +68,8 @@ class ChanSignalResult:
     trend_type:    str = "none"             # "trend"|"consolidation"|"none"
     pivot_total:   int = 0                  # 最近窗口内中枢总数
     fractal_stop:  bool = False             # 末笔分型是否完成停顿确认
+    stroke_confirmed: bool = True           # A: 末笔是否"定笔"（终点分型再过 N 根才确认，反右端重画）
+    atr_pct:       float = 0.0              # C': 近20日均振幅(High-Low)/Close；高=日线结构噪声大
 
     # 实战参数（仅在有买/卖信号时填充）
     stop_loss: Optional[float] = None       # 止损价
@@ -412,11 +422,23 @@ def compute_chan_signal(
         # 分型停顿确认（缠论第四章核心过滤）
         fractal_stop = _fractal_stopped(last, pbars, df) if is_fresh else False
 
+        # ── C'：波动率护栏（近20日均振幅）──────────────────────
+        # 高波动名(如±10%/日)右端笔极不稳，提高定笔门槛并标记，避免隔夜甩动。
+        rng = ((df["High"] - df["Low"]) / df["Close"].replace(0, np.nan)).tail(20)
+        atr_pct = float(rng.mean()) if rng.notna().any() else 0.0
+        high_vol = atr_pct >= HIGH_VOL_PCT
+
+        # ── A：定笔确认（末笔终点分型须再过 confirm_bars 根，反右端重画）──
+        # 右端最后一笔在新K线到来时常被重新切分；未"定笔"前不发信号，从源头压制隔夜翻转。
+        confirm_bars   = STROKE_CONFIRM_BARS + (HIGH_VOL_EXTRA_CONFIRM if high_vol else 0)
+        bars_since_end = (len(pbars) - 1) - last.end.pbar_idx
+        stroke_confirmed = bars_since_end >= confirm_bars
+
         buy_type  = sell_type = "none"
         raw_score = 0.0
         diverge   = False
 
-        if is_fresh and fractal_stop:
+        if is_fresh and fractal_stop and stroke_confirmed:
             buy_type, raw_score, diverge = _detect_buy(
                 strokes, latest_pivot, hist, df, close)
             if buy_type == "none":
@@ -452,10 +474,13 @@ def compute_chan_signal(
                  if latest_pivot else "无中枢")
         point = active_pt if active_pt != "none" else "neutral"
         rstr  = f" stop={stop_loss} R={r_ratio:.3f}" if r_ratio else ""
+        confirm_tag = ("定笔✓" if stroke_confirmed
+                       else f"未定笔(右端{bars_since_end}/{confirm_bars})")
+        vol_tag = f" 高波动{atr_pct:.0%}" if high_vol else ""
         reasoning = (
             f"笔={len(strokes)} {pstr} 周线={weekly} {trend_type} "
             f"末笔={last.direction}{'✓' if is_fresh else '×'}"
-            f"{'停顿✓' if fractal_stop else '停顿×'} "
+            f"{'停顿✓' if fractal_stop else '停顿×'} {confirm_tag}{vol_tag} "
             f"→ {point} div={diverge} res={resonance} score={score:+.2f}{rstr}"
         )
         logger.debug(f"[Chan] {ticker}: {reasoning}")
@@ -480,6 +505,8 @@ def compute_chan_signal(
             trend_type=trend_type,
             pivot_total=len(all_pivots),
             fractal_stop=fractal_stop,
+            stroke_confirmed=stroke_confirmed,
+            atr_pct=atr_pct,
             stop_loss=stop_loss,
             r_ratio=r_ratio,
             score=score,
