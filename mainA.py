@@ -10,8 +10,10 @@ output/ashare/{date}/（Markdown + CSV）。
 """
 from __future__ import annotations
 
+import re
+import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Set
 
 import pandas as pd
 from loguru import logger
@@ -19,7 +21,7 @@ from loguru import logger
 import utils.logger  # 触发日志格式初始化
 from utils.time_utils import today_str
 
-from data.ashare_loader import load_ashare_prices, board_limit
+from data.ashare_loader import load_ashare_prices, load_one_csv, classify_board, board_limit
 from signals.chan.chan_signal_ashare import compute_chan_signal_ashare
 from decision.strategy_ashare import make_ashare_decision, AShareDecision
 from decision.hysteresis_ashare import apply_hysteresis_ashare
@@ -151,6 +153,81 @@ def build_report(decisions: List[AShareDecision], date_str: str) -> str:
     return "\n".join(lines)
 
 
+def _prompt_watchlist() -> List[str]:
+    """
+    提示用户输入手动关注的股票代码列表，返回去重后的有效 6 位代码。
+    非 TTY 环境（如后台运行）自动跳过，返回空列表。
+
+    支持两种格式：
+      逗号分隔：603986,301308,000060
+      Python列表：["603986","301308","000060"]
+    """
+    if not sys.stdin.isatty():
+        return []
+
+    sep = "─" * 52
+    print(f"\n{sep}")
+    print("  手动关注股票（可选）")
+    print("  格式：603986,301308  或  [\"603986\",\"301308\"]")
+    print("  直接回车跳过")
+    print(sep)
+    raw = input("  输入关注代码: ").strip()
+    if not raw:
+        return []
+
+    cleaned = raw.replace("[", "").replace("]", "").replace('"', "").replace("'", "")
+    seen: Set[str] = set()
+    result: List[str] = []
+    for part in cleaned.split(","):
+        part = part.strip()
+        m = re.search(r"\d{6}", part)
+        if m:
+            code = m.group(0)
+            if code not in seen:
+                seen.add(code)
+                result.append(code)
+        elif part:
+            logger.warning(f"[Watchlist] 无效代码格式，跳过: {part!r}")
+    return result
+
+
+def _analyse_watchlist(
+    codes: List[str],
+    existing_codes: Set[str],
+    folder: str = "processed_stocks_selected",
+) -> List[AShareDecision]:
+    """
+    对手动关注股票补跑缠论信号。
+    已在全量筛选结果中的代码直接跳过（去重）；找不到数据文件的代码告警跳过。
+    """
+    new_codes = [c for c in codes if c not in existing_codes]
+    if not new_codes:
+        logger.info("[Watchlist] 所有关注股票已在全量结果中，无需补跑")
+        return []
+
+    base = Path(folder)
+    extra: List[AShareDecision] = []
+    for code in new_codes:
+        matches = sorted(base.glob(f"*{code}*.csv"))
+        if not matches:
+            logger.warning(f"[Watchlist] {code} 未找到数据文件（不在 {folder}/），跳过")
+            continue
+        df = load_one_csv(matches[0])
+        if df is None or len(df) < 200:
+            logger.warning(f"[Watchlist] {code} 数据不足，跳过")
+            continue
+        board = classify_board(code)
+        df.attrs["board"] = board
+        chan = compute_chan_signal_ashare(code, df, board)
+        d    = make_ashare_decision(code, chan, df, board)
+        extra.append(d)
+        logger.info(
+            f"[Watchlist] {code} [{_BOARD_CN.get(board, board)}] "
+            f"{d.rating} score={d.score:+.2f}"
+        )
+    return extra
+
+
 def main() -> None:
     date_str = today_str()
     logger.info("=" * 55)
@@ -161,6 +238,19 @@ def main() -> None:
     if not decisions:
         logger.error("无可分析个股")
         return
+
+    # 手动关注股票：用户输入列表，补跑信号后与全量筛选结果合并去重
+    watchlist = _prompt_watchlist()
+    if watchlist:
+        existing = {d.code for d in decisions}
+        extra = _analyse_watchlist(watchlist, existing)
+        if extra:
+            logger.info(f"[Watchlist] 补入 {len(extra)} 支关注股票")
+            # 合并去重（code 为 key），按 score 重新排序
+            merged = {d.code: d for d in decisions}
+            for d in extra:
+                merged[d.code] = d
+            decisions = sorted(merged.values(), key=lambda d: d.score, reverse=True)
 
     # B 迟滞：抑制"昨 Buy→今 Avoid"隔夜翻转（需连续确认才清仓）
     apply_hysteresis_ashare(decisions, date_str)
