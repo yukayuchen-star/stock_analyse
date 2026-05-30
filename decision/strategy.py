@@ -66,6 +66,11 @@ def make_decision(
         chan_macro_state=scored.chan_macro_state,
     )
 
+    # R_MAX 超标时降级评级（risk_overlay 已将仓位清零，同步评级避免显示矛盾）
+    if any("R_MAX_EXCEEDED" in f for f in risk.risk_flags):
+        if rating in ("Buy", "Overweight"):
+            rating = "Hold"
+
     return StockDecision(
         ticker=ticker,
         rating=rating,

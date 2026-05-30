@@ -14,14 +14,15 @@ from typing import List, Tuple
 from signals.chan.chan_signal    import ChanSignalResult
 from signals.macro.macro_signal import MacroSignalResult
 
-# 各 VIX 制度下的止损比例（从当前价格起算）
+# 各 VIX 制度下的止损比例（仅在无缠论结构止损时使用的兜底百分比）
 _STOP_PCT = {
     "calm":    0.07,
     "neutral": 0.08,
-    "tense":   0.06,   # 高波动期收紧止损
+    "tense":   0.06,
     "panic":   0.05,
 }
-_TP_RATIO = 2.0        # 止盈 = 止损 × 2（2:1 风险回报）
+_TP_RATIO = 2.0   # 止盈 = R × 2（2:1 风险回报）
+_R_MAX    = 0.15  # 结构止损 R > 15% → 离支撑太远，降级 Hold（与 A 股对齐）
 
 
 @dataclass
@@ -66,6 +67,19 @@ def apply_risk_overlay(
 
         suggested_pos = round(min(raw_pos, position_limit), 2)
 
+    # ── R_MAX 门控：结构止损离入场太远则不宜追，降级 Hold ─────
+    # 缠论买点的结构止损(chan.stop_loss)由 _calc_stop_and_r 确定，
+    # 若 R = (当前价 - 结构止损) / 当前价 > _R_MAX，说明买点不在合理价位，降级。
+    chan_r = chan.r_ratio  # 已由 chan_signal._calc_stop_and_r 计算
+    if (chan.buy_point_type is not None
+            and chan_r is not None
+            and chan_r > _R_MAX
+            and vix_regime != "panic"):
+        flags.append(
+            f"R_MAX_EXCEEDED: 结构止损R={chan_r:.1%}>{_R_MAX:.0%}，"
+            f"入场离支撑太远，降级Hold")
+        suggested_pos = 0.0
+
     # ── 风险标签 ──────────────────────────────────────────────
     if divergence_applied:
         flags.append("CHAN_QUANT_DIV: 缠论↑量化↓，结构信号优先")
@@ -82,16 +96,23 @@ def apply_risk_overlay(
     if getattr(chan, "atr_pct", 0.0) >= 0.06:
         flags.append(f"HIGH_VOL: 日均振幅{chan.atr_pct:.0%}，日线结构噪声大、信号可信度低")
 
-    # ── 止损/止盈 ─────────────────────────────────────────────
-    stop_pct = _STOP_PCT.get(vix_regime, 0.08)
+    # ── 止损/止盈：优先用缠论结构止损；无结构止损时退回 VIX 百分比兜底 ──
+    # 结构止损(chan.stop_loss)由 _calc_stop_and_r 基于笔低/中枢上沿计算，
+    # 比"当前价×固定百分比"更贴近缠论逻辑且与入场区间同一套坐标。
     if final_score > 0 and current_price > 0:
-        stop_loss   = round(current_price * (1 - stop_pct), 2)
-        take_profit = round(current_price * (1 + stop_pct * _TP_RATIO), 2)
+        if chan.stop_loss:
+            stop_loss   = round(chan.stop_loss, 2)
+            risk_amount = current_price - stop_loss
+            take_profit = round(current_price + risk_amount * _TP_RATIO, 2)
+        else:
+            stop_pct    = _STOP_PCT.get(vix_regime, 0.08)
+            stop_loss   = round(current_price * (1 - stop_pct), 2)
+            take_profit = round(current_price * (1 + stop_pct * _TP_RATIO), 2)
     else:
         stop_loss = take_profit = 0.0
 
-    # ── 入场区间（优先缠论中枢） ──────────────────────────────
-    entry_range = _entry_range(chan, current_price)
+    # ── 入场区间（优先缠论中枢，B3 入场窗口已过则用当前价）──────
+    entry_range = _entry_range(chan, current_price, flags)
 
     return RiskOverlay(
         suggested_position=suggested_pos,
@@ -102,7 +123,8 @@ def apply_risk_overlay(
     )
 
 
-def _entry_range(chan: ChanSignalResult, price: float) -> Tuple[float, float]:
+def _entry_range(chan: ChanSignalResult, price: float,
+                 flags: List[str]) -> Tuple[float, float]:
     pivot = chan.current_pivot
     btype = chan.buy_point_type
 
@@ -111,7 +133,16 @@ def _entry_range(chan: ChanSignalResult, price: float) -> Tuple[float, float]:
         if btype == "b2":
             return (round(zd, 2), round((zd + zg) / 2, 2))
         elif btype == "b3":
-            return (round(zg * 0.99, 2), round(zg * 1.03, 2))
+            ideal_lo = round(zg * 0.99, 2)
+            ideal_hi = round(zg * 1.03, 2)
+            if price > ideal_hi:
+                # 当前价已高于 B3 理想回踩区——入场窗口可能已过。
+                # 显示当前价附近，并标记提示，避免误导"等它跌到 ZG 再买"。
+                flags.append(
+                    f"B3_WINDOW_PASSED: 当前价{price:.2f}高于理想回踩区({ideal_lo}~{ideal_hi})，"
+                    f"入场窗口可能已过，如需建仓请以当前价为基准")
+                return (round(price * 0.995, 2), round(price * 1.005, 2))
+            return (ideal_lo, ideal_hi)
 
     if price > 0:
         return (round(price * 0.995, 2), round(price * 1.005, 2))
