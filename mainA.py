@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 import pandas as pd
 from loguru import logger
@@ -72,7 +72,8 @@ def _decisions_to_rows(decisions: List[AShareDecision]) -> List[dict]:
     return rows
 
 
-def build_report(decisions: List[AShareDecision], date_str: str) -> str:
+def build_report(decisions: List[AShareDecision], date_str: str,
+                 watchlist_codes: Optional[Set[str]] = None) -> str:
     buys  = [d for d in decisions if d.rating == "Buy"]
     watch = [d for d in decisions if d.rating == "Watch"]
 
@@ -138,6 +139,49 @@ def build_report(decisions: List[AShareDecision], date_str: str) -> str:
 
     lines += _table("观察区（Watch）", watch)
 
+    # 手动关注股票走势分析（Buy/Watch 已展示的不重复，只分析其余的）
+    if watchlist_codes:
+        shown = {d.code for d in buys + watch}
+        wl_pending = [d for d in decisions
+                      if d.code in watchlist_codes and d.code not in shown]
+        wl_shown   = [d for d in decisions
+                      if d.code in watchlist_codes and d.code in shown]
+
+        lines += [
+            "## 手动关注股票走势分析",
+            "",
+            "> 对手动输入的关注股票做缠论结构诊断：当前走势阶段 + 距离可买入条件分析。",
+            "> 已触发 Buy/Watch 的关注票见上方对应区，此处仅列出尚未达到买点的票。",
+            "",
+        ]
+
+        if wl_shown:
+            lines += [f"**已触发信号（见上方 Buy/Watch 区）**：{', '.join(d.code for d in wl_shown)}", ""]
+
+        if wl_pending:
+            lines += [
+                "| 代码 | 板块 | 现价 | 周线 | 走势结构 | 笔数 | 中枢 ZD~ZG | 距离买点分析 |",
+                "|------|------|------|------|---------|------|-----------|------------|",
+            ]
+            for d in wl_pending:
+                pv  = f"{d.pivot['ZD']:.2f}~{d.pivot['ZG']:.2f}" if d.pivot else "—"
+                bn  = str(d.chan.stroke_count) if d.chan else "—"
+                analysis = _buy_distance_analysis(d)
+                lines.append(
+                    f"| {d.code} | {_BOARD_CN.get(d.board, d.board)} | {d.current_price:.2f} "
+                    f"| {d.weekly} | {d.trend_type} | {bn} | {pv} | {analysis} |"
+                )
+            lines += [
+                "",
+                "### 走势详情",
+                "",
+            ]
+            for d in wl_pending:
+                lines.append(f"- **{d.code}**：{d.reasoning}")
+            lines.append("")
+        else:
+            lines += ["（关注股票均已触发信号，见上方 Buy/Watch 区）", ""]
+
     lines += [
         "## 全池排名（按 score 降序，前 30）",
         "",
@@ -151,6 +195,80 @@ def build_report(decisions: List[AShareDecision], date_str: str) -> str:
         )
     lines += ["", "---", f"*生成时间: {date_str} | 数据源: processed_stocks_selected*"]
     return "\n".join(lines)
+
+
+def _buy_distance_analysis(d: AShareDecision) -> str:
+    """
+    分析距离可买入条件还有多远，返回简洁的人类可读描述（供手动关注分析区使用）。
+    依赖 d.chan（ChanSignalResult）里的结构字段；若 chan 为 None 则回退到 reasoning 解析。
+    """
+    # 已触发买点 → 见 Buy/Watch 区
+    if d.buy_point in ("b1", "b2", "b3", "lb2"):
+        return f"✅ 已触发 {d.buy_point}，见 Buy/Watch 区"
+
+    # 有卖出信号
+    if d.sell_point:
+        return f"⛔ 当前为 {d.sell_point} 卖出结构，不建议入场"
+
+    issues: List[str] = []
+    chan = d.chan
+    r = d.reasoning
+
+    # 周线
+    if d.weekly == "down":
+        issues.append("周线向下(多头信号打折，需等周线企稳)")
+
+    # 结构推断
+    if chan is not None:
+        stroke_dir = chan.last_stroke_direction
+        fractal_ok = chan.fractal_stop
+        stroke_ok  = getattr(chan, "stroke_confirmed", True)
+
+        if stroke_dir == "up":
+            issues.append("末笔向上 → 需等上涨结束后形成下跌回调笔，才能构成 b2/b3 买点")
+        elif stroke_dir == "down":
+            if not fractal_ok:
+                issues.append("末笔向下✓ 但分型停顿未确认 → 观察 1-2 天等停顿确认")
+            elif not stroke_ok:
+                issues.append("停顿✓ 但末笔未定笔(右端不稳) → 再等 2 根 K 线确认")
+            else:
+                # 结构齐备但没发买点 → 中枢/价位问题
+                if d.pivot:
+                    zg, zd = d.pivot["ZG"], d.pivot["ZD"]
+                    price  = d.current_price
+                    dist   = (price - zd) / max(price, 1)
+                    if dist > 0.10:
+                        issues.append(
+                            f"结构具备但现价({price:.2f})距中枢下沿 ZD({zd:.2f})"
+                            f" 尚有 {dist:.0%}，等进一步回踩")
+                    else:
+                        issues.append(
+                            f"接近买点区(ZD={zd:.2f} ZG={zg:.2f})，"
+                            f"可能被 R/门控过滤 → 关注停顿后确认")
+                else:
+                    issues.append("末笔向下✓停顿✓定笔✓ 但暂无有效中枢，结构不足")
+    else:
+        # 回退：解析 reasoning 关键字
+        if "末笔=up" in r:
+            issues.append("末笔向上 → 等形成回调下跌笔")
+        elif "停顿×" in r:
+            issues.append("末笔向下但停顿未确认 → 观察 1-2 天")
+        elif "未定笔" in r:
+            issues.append("停顿✓ 但末笔未定笔 → 再等几根 K 确认")
+
+    # R 超限
+    if d.r_ratio and d.r_ratio > 0.15:
+        issues.append(
+            f"R={d.r_ratio:.0%}>15% 入场离支撑太远 → 需价格回踩至支撑附近再看")
+
+    # 无中枢
+    if not d.pivot and not issues:
+        issues.append("笔数不足或尚未形成有效中枢，需更多走势积累")
+
+    if not issues:
+        issues.append("结构条件尚不成熟，持续跟踪")
+
+    return "；".join(issues)
 
 
 def _prompt_watchlist() -> List[str]:
@@ -240,17 +358,21 @@ def main() -> None:
         return
 
     # 手动关注股票：用户输入列表，补跑信号后与全量筛选结果合并去重
+    watchlist_codes: Optional[Set[str]] = None
     watchlist = _prompt_watchlist()
     if watchlist:
+        watchlist_input = set(watchlist)
         existing = {d.code for d in decisions}
+        # 全量筛选中已有的关注股票直接纳入 watchlist_codes，不重复跑
         extra = _analyse_watchlist(watchlist, existing)
         if extra:
             logger.info(f"[Watchlist] 补入 {len(extra)} 支关注股票")
-            # 合并去重（code 为 key），按 score 重新排序
             merged = {d.code: d for d in decisions}
             for d in extra:
                 merged[d.code] = d
             decisions = sorted(merged.values(), key=lambda d: d.score, reverse=True)
+        # 记录所有关注代码（含已在全量结果里的），供报告分区
+        watchlist_codes = watchlist_input
 
     # B 迟滞：抑制"昨 Buy→今 Avoid"隔夜翻转（需连续确认才清仓）
     apply_hysteresis_ashare(decisions, date_str)
@@ -265,7 +387,7 @@ def main() -> None:
 
     # Markdown
     md_path = out_dir / "ashare_selection.md"
-    md_path.write_text(build_report(decisions, date_str), encoding="utf-8")
+    md_path.write_text(build_report(decisions, date_str, watchlist_codes), encoding="utf-8")
 
     buys  = [d for d in decisions if d.rating == "Buy"]
     watch = [d for d in decisions if d.rating == "Watch"]
