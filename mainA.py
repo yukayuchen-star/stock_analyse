@@ -271,42 +271,70 @@ def _buy_distance_analysis(d: AShareDecision) -> str:
     return "；".join(issues)
 
 
-def _prompt_watchlist() -> List[str]:
+_WATCHLIST_FILE = "watchlist.txt"
+
+
+def _parse_codes(raw: str) -> List[str]:
+    """从原始文本提取去重后的 6 位股票代码。
+
+    支持混合格式：逗号/换行/空格分隔、Python 列表、带引号、带 sh/sz 前后缀。
+    以 # 开头的行视为注释忽略。
     """
-    提示用户输入手动关注的股票代码列表，返回去重后的有效 6 位代码。
-    非 TTY 环境（如后台运行）自动跳过，返回空列表。
-
-    支持两种格式：
-      逗号分隔：603986,301308,000060
-      Python列表：["603986","301308","000060"]
-    """
-    if not sys.stdin.isatty():
-        return []
-
-    sep = "─" * 52
-    print(f"\n{sep}")
-    print("  手动关注股票（可选）")
-    print("  格式：603986,301308  或  [\"603986\",\"301308\"]")
-    print("  直接回车跳过")
-    print(sep)
-    raw = input("  输入关注代码: ").strip()
-    if not raw:
-        return []
-
-    cleaned = raw.replace("[", "").replace("]", "").replace('"', "").replace("'", "")
+    # 去掉注释行
+    text = "\n".join(
+        line for line in raw.splitlines() if not line.strip().startswith("#")
+    )
+    cleaned = (text.replace("[", " ").replace("]", " ")
+                   .replace('"', " ").replace("'", " ")
+                   .replace(",", " ").replace("\n", " ").replace("\t", " "))
     seen: Set[str] = set()
     result: List[str] = []
-    for part in cleaned.split(","):
+    for part in cleaned.split():
         part = part.strip()
+        if not part:
+            continue
         m = re.search(r"\d{6}", part)
         if m:
             code = m.group(0)
             if code not in seen:
                 seen.add(code)
                 result.append(code)
-        elif part:
+        else:
             logger.warning(f"[Watchlist] 无效代码格式，跳过: {part!r}")
     return result
+
+
+def _load_watchlist() -> List[str]:
+    """加载手动关注股票代码列表。
+
+    优先读项目根目录 `watchlist.txt`（每行/逗号分隔代码，# 注释）——
+    不依赖 TTY，IDE 运行/后台运行均可用，是推荐方式。
+    文件不存在且处于交互终端(TTY)时，回退到 input() 交互输入。
+    """
+    f = Path(_WATCHLIST_FILE)
+    if f.exists():
+        raw = f.read_text(encoding="utf-8")
+        codes = _parse_codes(raw)
+        logger.info(f"[Watchlist] 从 {_WATCHLIST_FILE} 读取 {len(codes)} 支关注股票")
+        return codes
+
+    if not sys.stdin.isatty():
+        logger.info(
+            f"[Watchlist] 无 {_WATCHLIST_FILE} 且非交互环境，跳过手动关注"
+            f"（如需：在项目根目录建 {_WATCHLIST_FILE}，每行一个代码）")
+        return []
+
+    sep = "─" * 52
+    print(f"\n{sep}")
+    print("  手动关注股票（可选）")
+    print("  格式：603986,301308  或  [\"603986\",\"301308\"]")
+    print(f"  提示：也可建 {_WATCHLIST_FILE} 文件免去每次输入")
+    print("  直接回车跳过")
+    print(sep)
+    raw = input("  输入关注代码: ").strip()
+    if not raw:
+        return []
+    return _parse_codes(raw)
 
 
 def _analyse_watchlist(
@@ -359,7 +387,7 @@ def main() -> None:
 
     # 手动关注股票：用户输入列表，补跑信号后与全量筛选结果合并去重
     watchlist_codes: Optional[Set[str]] = None
-    watchlist = _prompt_watchlist()
+    watchlist = _load_watchlist()
     if watchlist:
         watchlist_input = set(watchlist)
         existing = {d.code for d in decisions}

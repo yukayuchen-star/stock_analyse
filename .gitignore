@@ -86,3 +86,5 @@ htmlcov/
 .claude/settings.json
 CLAUDE.md
 缠论.md
+
+watchlist.txt  # 用户个人关注股票列表（个人数据，不入库）
