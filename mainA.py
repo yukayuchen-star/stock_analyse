@@ -25,6 +25,7 @@ from data.ashare_loader import load_ashare_prices, load_one_csv, classify_board,
 from signals.chan.chan_signal_ashare import compute_chan_signal_ashare
 from decision.strategy_ashare import make_ashare_decision, AShareDecision
 from decision.hysteresis_ashare import apply_hysteresis_ashare
+from decision.holdings_ashare import evaluate_holdings
 
 _BOARD_CN = {"main": "主板", "chinext": "创业板", "star": "科创板", "bse": "北交所"}
 
@@ -72,10 +73,36 @@ def _decisions_to_rows(decisions: List[AShareDecision]) -> List[dict]:
     return rows
 
 
+def _holdings_section(holdings: list) -> List[str]:
+    """渲染「我的持仓跟踪」区。holdings 为 Holding 列表（已体检）。"""
+    if not holdings:
+        return []
+    _ACT_ICON = {"持有": "🟢", "减仓观察": "🟡", "卖出": "🔴", "止损": "⛔"}
+    out = [
+        "## 我的持仓跟踪",
+        "",
+        "> 对 holdings.txt 中的持仓逐支缠论体检：浮动盈亏 + 持有/减仓/卖出/止损建议。",
+        "",
+        "| 代码 | 板块 | 买入价 | 现价 | 浮动盈亏 | 建议 | 结构止损 | 说明 |",
+        "|------|------|--------|------|---------|------|---------|------|",
+    ]
+    for h in holdings:
+        icon = _ACT_ICON.get(h.action, "")
+        sl = f"{h.stop_loss:.2f}" if h.stop_loss else "—"
+        out.append(
+            f"| {h.code} | {_BOARD_CN.get(classify_board(h.code), '—')} "
+            f"| {h.buy_price:.2f} | {h.current_price:.2f} | {h.pnl_pct:+.1%} "
+            f"| {icon}{h.action} | {sl} | {h.reason} |")
+    out.append("")
+    return out
+
+
 def build_report(decisions: List[AShareDecision], date_str: str,
-                 watchlist_codes: Optional[Set[str]] = None) -> str:
+                 watchlist_codes: Optional[Set[str]] = None,
+                 holdings: Optional[list] = None) -> str:
     buys  = [d for d in decisions if d.rating == "Buy"]
     watch = [d for d in decisions if d.rating == "Watch"]
+    n_avoid = sum(1 for d in decisions if d.rating == "Avoid")
 
     lines = [
         f"# A 股缠论选股 — {date_str}",
@@ -89,8 +116,12 @@ def build_report(decisions: List[AShareDecision], date_str: str,
         f"| 分析个股 | {len(decisions)} |",
         f"| 买入候选(Buy) | {len(buys)} |",
         f"| 观察(Watch) | {len(watch)} |",
+        f"| 卖出信号(Avoid) | {n_avoid} |",
         "",
     ]
+
+    # 我的持仓跟踪（置顶——最关心的是手里的票）
+    lines += _holdings_section(holdings or [])
 
     def _table(title: str, items: List[AShareDecision]) -> List[str]:
         if not items:
@@ -138,6 +169,28 @@ def build_report(decisions: List[AShareDecision], date_str: str,
         lines += [""]
 
     lines += _table("观察区（Watch）", watch)
+
+    # 卖出信号区（Avoid）：当日全市场触发缠论卖点(s1/s2/s3)的票
+    sells = [d for d in decisions if d.rating == "Avoid"]
+    if sells:
+        lines += [
+            "## 卖出信号（Avoid）",
+            "",
+            "> 当日触发缠论卖点(s1顶背驰/s2/s3破中枢)的票——若你持有应考虑减仓/离场；",
+            "> 注：这是全市场扫描结果，非针对你的持仓（个人持仓见「我的持仓跟踪」）。",
+            "",
+            "| 代码 | 板块 | 卖点 | 现价 | 中枢 ZD~ZG | 周线 | score |",
+            "|------|------|------|------|-----------|------|-------|",
+        ]
+        for d in sells:
+            pv = f"{d.pivot['ZD']:.2f}~{d.pivot['ZG']:.2f}" if d.pivot else "—"
+            lines.append(
+                f"| {d.code} | {_BOARD_CN.get(d.board, d.board)} | {d.sell_point or '—'} "
+                f"| {d.current_price:.2f} | {pv} | {d.weekly} | {d.score:+.2f} |")
+        lines += [""]
+        for d in sells:
+            lines.append(f"- **{d.code}**: {d.reasoning}")
+        lines += [""]
 
     # 手动关注股票走势分析（Buy/Watch 已展示的不重复，只分析其余的）
     if watchlist_codes:
@@ -405,6 +458,11 @@ def main() -> None:
     # B 迟滞：抑制"昨 Buy→今 Avoid"隔夜翻转（需连续确认才清仓）
     apply_hysteresis_ashare(decisions, date_str)
 
+    # 持仓跟踪：对 holdings.txt 中的个人持仓逐支缠论体检
+    holdings = evaluate_holdings()
+    if holdings:
+        logger.info(f"[Holdings] 体检 {len(holdings)} 支持仓")
+
     out_dir = Path("output") / "ashare" / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -415,7 +473,9 @@ def main() -> None:
 
     # Markdown
     md_path = out_dir / "ashare_selection.md"
-    md_path.write_text(build_report(decisions, date_str, watchlist_codes), encoding="utf-8")
+    md_path.write_text(
+        build_report(decisions, date_str, watchlist_codes, holdings),
+        encoding="utf-8")
 
     buys  = [d for d in decisions if d.rating == "Buy"]
     watch = [d for d in decisions if d.rating == "Watch"]
