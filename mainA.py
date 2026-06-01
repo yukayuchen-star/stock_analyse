@@ -26,6 +26,10 @@ from signals.chan.chan_signal_ashare import compute_chan_signal_ashare
 from decision.strategy_ashare import make_ashare_decision, AShareDecision
 from decision.hysteresis_ashare import apply_hysteresis_ashare
 from decision.holdings_ashare import evaluate_holdings
+from decision.portfolio_core import (
+    Signal, load_portfolio, save_portfolio, update_portfolio,
+)
+from config.stocks_ashare import PORTFOLIO_INITIAL_CAPITAL, PORTFOLIO_LOT_SIZE
 
 _BOARD_CN = {"main": "主板", "chinext": "创业板", "star": "科创板", "bse": "北交所"}
 
@@ -99,7 +103,8 @@ def _holdings_section(holdings: list) -> List[str]:
 
 def build_report(decisions: List[AShareDecision], date_str: str,
                  watchlist_codes: Optional[Set[str]] = None,
-                 holdings: Optional[list] = None) -> str:
+                 holdings: Optional[list] = None,
+                 portfolio: Optional[dict] = None) -> str:
     buys  = [d for d in decisions if d.rating == "Buy"]
     watch = [d for d in decisions if d.rating == "Watch"]
     n_avoid = sum(1 for d in decisions if d.rating == "Avoid")
@@ -120,7 +125,11 @@ def build_report(decisions: List[AShareDecision], date_str: str,
         "",
     ]
 
-    # 我的持仓跟踪（置顶——最关心的是手里的票）
+    # 模拟组合（置顶——最关心的是按策略走的整体盈亏）
+    if portfolio:
+        lines += _portfolio_section(portfolio, decisions)
+
+    # 我的持仓跟踪（holdings.txt 个人实盘持仓，与模拟组合独立）
     lines += _holdings_section(holdings or [])
 
     def _table(title: str, items: List[AShareDecision]) -> List[str]:
@@ -427,6 +436,106 @@ def _analyse_watchlist(
     return extra
 
 
+_PORTFOLIO_PATH = Path("output") / "ashare_portfolio.json"
+
+
+def _run_portfolio(decisions: List[AShareDecision], date_str: str) -> dict:
+    """按策略信号推进模拟组合一天（不改策略，仅记账）。返回组合状态。"""
+    # 当日 Buy 排名（score 降序）→ rank，用于现金不足时优先靠前的票
+    buys_sorted = sorted([d for d in decisions if d.rating == "Buy"],
+                         key=lambda d: d.score, reverse=True)
+    rank_of = {d.code: i + 1 for i, d in enumerate(buys_sorted)}
+
+    signals = [
+        Signal(
+            code=d.code,
+            price=d.current_price,
+            is_buy=(d.rating == "Buy"),
+            is_sell=(d.rating == "Avoid" or d.sell_point is not None),
+            position_frac=d.suggested_position,
+            stop_loss=d.stop_loss or 0.0,
+            rank=rank_of.get(d.code, 0),
+        )
+        for d in decisions
+    ]
+    state = load_portfolio(_PORTFOLIO_PATH, PORTFOLIO_INITIAL_CAPITAL)
+    update_portfolio(state, date_str, signals, lot_size=PORTFOLIO_LOT_SIZE)
+    save_portfolio(_PORTFOLIO_PATH, state)
+    return state
+
+
+def _portfolio_section(state: dict, decisions: List[AShareDecision]) -> List[str]:
+    """渲染「模拟组合」区：当日权益/盈亏 + 持仓明细 + 当日成交。"""
+    hist = state.get("history", [])
+    if not hist:
+        return []
+    cur = hist[-1]
+    initial = state["initial_capital"]
+    price_now = {d.code: d.current_price for d in decisions if d.current_price > 0}
+    name_board = {d.code: _BOARD_CN.get(d.board, d.board) for d in decisions}
+
+    out = [
+        "## 模拟组合（按策略信号自动买卖）",
+        "",
+        f"> 初始资金 ¥{initial:,.0f}，从启用日起严格按策略 Buy/卖点信号模拟买卖、跨日追踪。",
+        f"> 成交价=信号当日收盘价，仓位=策略建议，A股按{PORTFOLIO_LOT_SIZE}股整手。",
+        "",
+        f"| 项目 | 值 |",
+        f"|--|--|",
+        f"| 总权益 | ¥{cur['equity']:,.2f} |",
+        f"| 累计盈亏 | {cur['total_pnl_pct']:+.2%}（¥{cur['equity']-initial:+,.2f}）|",
+        f"| 持仓市值 | ¥{cur['market_value']:,.2f} |",
+        f"| 可用现金 | ¥{cur['cash']:,.2f} |",
+        f"| 持仓数 | {cur['n_positions']} |",
+        f"| 记录天数 | {len(hist)} |",
+        "",
+    ]
+
+    positions = state.get("positions", {})
+    if positions:
+        out += [
+            "### 当前持仓",
+            "",
+            "| 代码 | 板块 | 买入价 | 现价 | 浮动盈亏 | 持股 | 市值 | 买入日 | 止损 |",
+            "|------|------|--------|------|---------|------|------|--------|------|",
+        ]
+        for code, pos in sorted(positions.items(),
+                                key=lambda kv: kv[1]["buy_date"]):
+            px = price_now.get(code, pos["cost_price"])
+            pnl = (px - pos["cost_price"]) / pos["cost_price"] if pos["cost_price"] else 0
+            mv = pos["shares"] * px
+            sl = f"{pos['stop_loss']:.2f}" if pos.get("stop_loss") else "—"
+            out.append(
+                f"| {code} | {name_board.get(code, '—')} | {pos['cost_price']:.2f} "
+                f"| {px:.2f} | {pnl:+.1%} | {pos['shares']} | ¥{mv:,.0f} "
+                f"| {pos['buy_date']} | {sl} |")
+        out.append("")
+
+    # 当日成交
+    today_trades = [t for t in state.get("trades", []) if t["date"] == cur["date"]]
+    if today_trades:
+        out += ["### 当日成交", "",
+                "| 代码 | 动作 | 价格 | 股数 | 盈亏 | 原因 |",
+                "|------|------|------|------|------|------|"]
+        for t in today_trades:
+            pnl = f"¥{t['pnl']:+,.0f}" if t["action"] == "卖出" else "—"
+            out.append(
+                f"| {t['code']} | {t['action']} | {t['price']:.2f} | {t['shares']} "
+                f"| {pnl} | {t['reason']} |")
+        out.append("")
+
+    # 权益曲线（最近10天）
+    if len(hist) > 1:
+        out += ["### 权益曲线（最近10天）", "",
+                "| 日期 | 总权益 | 累计盈亏 | 持仓数 |",
+                "|------|--------|---------|--------|"]
+        for h in hist[-10:]:
+            out.append(f"| {h['date']} | ¥{h['equity']:,.0f} "
+                       f"| {h['total_pnl_pct']:+.2%} | {h['n_positions']} |")
+        out.append("")
+    return out
+
+
 def main() -> None:
     date_str = today_str()
     logger.info("=" * 55)
@@ -463,6 +572,14 @@ def main() -> None:
     if holdings:
         logger.info(f"[Holdings] 体检 {len(holdings)} 支持仓")
 
+    # 模拟组合：按策略信号自动买卖、跨日追踪（不改策略，仅记账）
+    portfolio = _run_portfolio(decisions, date_str)
+    pf_cur = portfolio["history"][-1]
+    logger.info(
+        f"[Portfolio] 权益¥{pf_cur['equity']:,.0f} "
+        f"累计{pf_cur['total_pnl_pct']:+.2%} 持仓{pf_cur['n_positions']}支 "
+        f"现金¥{pf_cur['cash']:,.0f}")
+
     out_dir = Path("output") / "ashare" / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -474,7 +591,7 @@ def main() -> None:
     # Markdown
     md_path = out_dir / "ashare_selection.md"
     md_path.write_text(
-        build_report(decisions, date_str, watchlist_codes, holdings),
+        build_report(decisions, date_str, watchlist_codes, holdings, portfolio),
         encoding="utf-8")
 
     buys  = [d for d in decisions if d.rating == "Buy"]

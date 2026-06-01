@@ -74,3 +74,7 @@ PSEUDO_B2_PUSH_PCT  = {"main": 0.03, "chinext": 0.05, "star": 0.05, "bse": 0.05}
 # ── 风控（缠论.md 引用利弗莫尔 2% 风险法则）─────────────────────
 RISK_BUDGET = 0.02   # 单笔最大风险占比（仓位 = RISK_BUDGET / R）
 R_MAX       = 0.15   # 结构止损距入场 > 15% → 离支撑太远、R/R 差，降级为 Watch
+
+# ── 模拟组合（paper-trading，从启用日起按策略信号前向模拟）──────
+PORTFOLIO_INITIAL_CAPITAL = 300_000   # A 股初始资金 ¥30万
+PORTFOLIO_LOT_SIZE        = 100       # A 股 1 手 = 100 股
