@@ -6,7 +6,10 @@ from loguru import logger
 
 import utils.logger  # 触发 setup_logger()
 from config.settings   import settings
-from config.stocks     import STOCK_POOL, BENCHMARKS, BUCKETS
+from config.stocks     import (
+    STOCK_POOL, BENCHMARKS, BUCKETS,
+    PORTFOLIO_INITIAL_CAPITAL, PORTFOLIO_LOT_SIZE,
+)
 from config.pool_manager import (
     PoolChange, append_pool_changes, load_dynamic_pool, save_pool_snapshot,
 )
@@ -20,6 +23,9 @@ from signals.screening           import (
 )
 from decision.strategy           import make_decision, StockDecision
 from decision.hysteresis         import apply_hysteresis
+from decision.portfolio_core     import (
+    Signal, load_portfolio, save_portfolio, update_portfolio,
+)
 from report.report_writer        import write_all_reports
 from backtest.engine             import run_all_backtests
 from backtest.report             import write_backtest_report
@@ -219,6 +225,106 @@ def _interactive_pool_editor(
     return final_pool, dynamic_pool, buckets, changes
 
 
+_PORTFOLIO_PATH = Path(settings.output_dir) / "us_portfolio.json"
+
+
+def _run_portfolio(decisions: Dict[str, StockDecision],
+                   prices: Dict, date_str: str) -> dict:
+    """按策略信号推进美股模拟组合一天（不改策略，仅记账）。
+
+    买入：Buy/Overweight 且未持仓 → 目标市值 = 建议仓位 × 初始资金。
+    卖出（全部卖出）：评级为 Sell/Underweight，或缠论出现卖点(s1/s2/s3)，或跌破结构止损。
+    成交价 = 信号当日收盘价。
+    """
+    _BUY  = {"Buy", "Overweight"}
+    _SELL = {"Sell", "Underweight"}
+
+    # 当日买入排名（final_score 降序）→ 现金不足时优先靠前的票
+    buys_sorted = sorted([d for d in decisions.values() if d.rating in _BUY],
+                         key=lambda d: d.final_score, reverse=True)
+    rank_of = {d.ticker: i + 1 for i, d in enumerate(buys_sorted)}
+
+    signals: List[Signal] = []
+    for ticker, d in decisions.items():
+        df = prices.get(ticker)
+        price = float(df["Close"].iloc[-1]) if df is not None and not df.empty else 0.0
+        sell_pt = (d.chan_signal.sell_point_type
+                   if d.chan_signal is not None else None)
+        signals.append(Signal(
+            code=ticker,
+            price=price,
+            is_buy=(d.rating in _BUY),
+            is_sell=(d.rating in _SELL or sell_pt is not None),
+            position_frac=d.suggested_position,
+            stop_loss=d.stop_loss or 0.0,
+            rank=rank_of.get(ticker, 0),
+        ))
+
+    state = load_portfolio(_PORTFOLIO_PATH, PORTFOLIO_INITIAL_CAPITAL)
+    update_portfolio(state, date_str, signals, lot_size=PORTFOLIO_LOT_SIZE)
+    save_portfolio(_PORTFOLIO_PATH, state)
+    return state
+
+
+def _write_portfolio_report(state: dict, prices: Dict, output_dir: Path,
+                            date_str: str) -> Path:
+    """写美股模拟组合报告 output/{date}/portfolio.md：权益/盈亏/持仓/成交/曲线。"""
+    hist = state.get("history", [])
+    cur = hist[-1] if hist else None
+    initial = state["initial_capital"]
+    price_now = {
+        t: float(df["Close"].iloc[-1])
+        for t, df in prices.items() if df is not None and not df.empty
+    }
+
+    L = [f"# 美股模拟组合 — {date_str}", ""]
+    if cur:
+        L += [
+            f"> 初始资金 ${initial:,.0f}，从启用日起严格按策略 Buy/卖点信号模拟买卖、跨日追踪。",
+            "> 成交价=信号当日收盘价，仓位=策略建议；持仓出现卖点(Sell/Underweight/s1/s2/s3)或跌破结构止损则全部卖出。",
+            "",
+            "| 项目 | 值 |", "|--|--|",
+            f"| 总权益 | ${cur['equity']:,.2f} |",
+            f"| 累计盈亏 | {cur['total_pnl_pct']:+.2%}（${cur['equity']-initial:+,.2f}）|",
+            f"| 持仓市值 | ${cur['market_value']:,.2f} |",
+            f"| 可用现金 | ${cur['cash']:,.2f} |",
+            f"| 持仓数 | {cur['n_positions']} |",
+            f"| 记录天数 | {len(hist)} |",
+            "",
+        ]
+    positions = state.get("positions", {})
+    if positions:
+        L += ["## 当前持仓（下一交易日初始持仓）", "",
+              "| 代码 | 买入价 | 现价 | 浮动盈亏 | 持股 | 市值 | 买入日 | 止损 |",
+              "|------|--------|------|---------|------|------|--------|------|"]
+        for code, pos in sorted(positions.items(), key=lambda kv: kv[1]["buy_date"]):
+            px = price_now.get(code, pos["cost_price"])
+            pnl = (px - pos["cost_price"]) / pos["cost_price"] if pos["cost_price"] else 0
+            sl = f"{pos['stop_loss']:.2f}" if pos.get("stop_loss") else "—"
+            L.append(f"| {code} | {pos['cost_price']:.2f} | {px:.2f} | {pnl:+.1%} "
+                     f"| {pos['shares']} | ${pos['shares']*px:,.0f} | {pos['buy_date']} | {sl} |")
+        L.append("")
+    today_trades = [t for t in state.get("trades", []) if cur and t["date"] == cur["date"]]
+    if today_trades:
+        L += ["## 当日成交", "",
+              "| 代码 | 动作 | 价格 | 股数 | 盈亏 | 原因 |",
+              "|------|------|------|------|------|------|"]
+        for t in today_trades:
+            pnl = f"${t['pnl']:+,.0f}" if t["action"] == "卖出" else "—"
+            L.append(f"| {t['code']} | {t['action']} | {t['price']:.2f} | {t['shares']} "
+                     f"| {pnl} | {t['reason']} |")
+        L.append("")
+    if len(hist) > 1:
+        L += ["## 权益曲线（最近15天）", "",
+              "| 日期 | 总权益 | 累计盈亏 | 持仓数 |", "|------|--------|---------|--------|"]
+        for h in hist[-15:]:
+            L.append(f"| {h['date']} | ${h['equity']:,.0f} | {h['total_pnl_pct']:+.2%} | {h['n_positions']} |")
+        L.append("")
+    path = output_dir / "portfolio.md"
+    path.write_text("\n".join(L), encoding="utf-8")
+    return path
+
+
 # ── 主流程 ──────────────────────────────────────────────────────
 
 def run() -> None:
@@ -348,6 +454,14 @@ def run() -> None:
     # ── B 迟滞：抑制"昨多→今出"隔夜翻转（需连续确认才清仓）──
     apply_hysteresis(decisions, date_str)
 
+    # ── 模拟组合：按策略信号自动买卖、跨日追踪（不改策略，仅记账）──
+    portfolio = _run_portfolio(decisions, prices, date_str)
+    pf_cur = portfolio["history"][-1]
+    logger.info(
+        f"── 模拟组合 ── 权益 ${pf_cur['equity']:,.0f} "
+        f"累计 {pf_cur['total_pnl_pct']:+.2%} 持仓 {pf_cur['n_positions']}支 "
+        f"现金 ${pf_cur['cash']:,.0f}")
+
     logger.info("── P5 综合评级排行 ──")
     for d in sorted(decisions.values(), key=lambda x: x.final_score, reverse=True):
         bar   = _score_bar(d.final_score)
@@ -375,6 +489,9 @@ def run() -> None:
     )
     for p in written:
         logger.info(f"  已写入: {p}")
+
+    pf_path = _write_portfolio_report(portfolio, prices, output_dir, date_str)
+    logger.info(f"  已写入: {pf_path}")
 
     logger.info("── 量化评分排行（按 score 降序）──")
     for r in sorted(quant_signals.values(), key=lambda x: x.score, reverse=True):
