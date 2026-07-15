@@ -53,11 +53,15 @@ def apply_risk_overlay(
     else:
         raw_pos = max(0.0, final_score)
 
-        # VIX tense：缠论买点须为 b1 且有多级共振才算有效
+        # VIX tense：缠论买点须为 b3（R4.2 实证唯一强类型），
+        # 或 b1+多级共振（缠论.md 下跌末端接底路径，保留但仍需共振）才算有效
         if vix_regime == "tense" and chan.buy_point_type is not None:
-            if chan.buy_point_type != "b1" or chan.level_resonance < 2:
+            accepted = (chan.buy_point_type == "b3"
+                        or (chan.buy_point_type == "b1"
+                            and chan.level_resonance >= 2))
+            if not accepted:
                 flags.append(
-                    f"VIX_TENSE_CHAN: 高波动下仅接受b1+多级共振"
+                    f"VIX_TENSE_CHAN: 高波动下仅接受b3或b1+多级共振"
                     f"（当前={chan.buy_point_type} res={chan.level_resonance}）"
                 )
                 raw_pos *= 0.5

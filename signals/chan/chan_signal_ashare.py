@@ -37,6 +37,11 @@ from config.stocks_ashare import (
 # 中枢末笔距今超过此值即视为旧中枢残影，门控丢弃（仅作用于实盘选股）。
 STALE_PIVOT_TD = 25
 
+# A股买点分值：沿用原标定，不采用美股 R4.2 重标定（b3强/b1、b2弱）。
+# 美股新分值仅基于美股 as-of 无偏基线；A股回测的幸存者偏差尚未修复（68.7%
+# 待重测），且已有牛短熊长门控压制 b1，重测出无偏基线前不动分值。
+BUY_SCORES_ASHARE: dict[str, float] = {"b1": 0.50, "b2": 0.75, "b3": 0.65}
+
 
 # ── MACD 柱：优先用预计算列 ──────────────────────────────────────
 
@@ -212,7 +217,8 @@ def compute_chan_signal_ashare(
         diverge   = False
         if is_fresh and fractal_stop and stroke_confirmed:
             buy_type, raw_score, diverge = _detect_buy(
-                strokes, latest_pivot, hist, df, close)
+                strokes, latest_pivot, hist, df, close,
+                scores=BUY_SCORES_ASHARE)
             if buy_type == "none":
                 sell_type, raw_score, diverge = _detect_sell(
                     strokes, latest_pivot, hist, df, close)
@@ -401,7 +407,8 @@ def extract_chan_events_ashare(df: pd.DataFrame) -> List[ChanEvent]:
         trend     = _classify_trend(build_all_pivots(sub_strokes[-30:]))
 
         buy_type, raw_score, _ = _detect_buy(
-            sub_strokes, pivot, sub_hist, sub_df, sub_close)
+            sub_strokes, pivot, sub_hist, sub_df, sub_close,
+            scores=BUY_SCORES_ASHARE)
         if buy_type != "none":
             if buy_type == "b1":
                 raw_score *= _trend_weight(trend)

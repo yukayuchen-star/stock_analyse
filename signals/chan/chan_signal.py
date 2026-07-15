@@ -8,8 +8,9 @@
   - 周线SMA20过滤（日线数据重采样），多头信号在周线下跌时×0.5
 
 得分约定（与 QuantSignalResult 同一空间 -1~1）：
-  B1=+0.50  B2=+0.75  B3=+0.65
-  S1=-0.50  S2=-0.65  S3=-0.70
+  美股买点分值见 BUY_SCORES（R4.2 重标定：B3=+0.75 > B2=+0.40 > B1=+0.35）
+  S1=-0.50  S2=-0.65  S3=-0.70（卖点未重标定：回测仅做多，无卖点侧胜率数据）
+  A股沿用原分值（chan_signal_ashare.BUY_SCORES_ASHARE），不受 R4.2 影响
 
 参考：HKUDS/Vibe-Trading（包含关系+笔去噪）+ 缠论.md（买卖点）
 """
@@ -32,6 +33,15 @@ STROKE_CONFIRM_BARS    = 2
 # C'：近20日均振幅 ≥ HIGH_VOL_PCT 视为高波动名，额外要求 HIGH_VOL_EXTRA_CONFIRM 根定笔确认 + 标记。
 HIGH_VOL_PCT           = 0.06
 HIGH_VOL_EXTRA_CONFIRM = 2
+
+# ── 美股买点分值（R4.2 重标定 2026-07-14）─────────────────────────
+# 依据 2026-07-09 as-of 无偏回放基线（R1.3 修复幸存者偏差后）：
+#   P7 核心池 7%SL/2:1TP 撮合：b3 胜率 53.3%（唯一期望为正，≈+0.60R），
+#   b1 35.3% / b2 35.6%（贴近 2:1 保本线 33.3%，无显著边际）。
+# → b3 升为最强买点（可独立驱动 Overweight）；b1/b2 降为弱信号
+#   （0.55×0.40≈0.22，需宏观 ≥+0.23 顺风才达 Overweight）。
+# A股不适用此标定（其回测偏差未修，b1/b2 表现不同），调用方传自己的表。
+BUY_SCORES: Dict[str, float] = {"b1": 0.35, "b2": 0.40, "b3": 0.75}
 
 
 # ── 结果数据类 ────────────────────────────────────────────────
@@ -299,10 +309,11 @@ def _detect_buy(
     hist:    pd.Series,
     df:      pd.DataFrame,
     close:   pd.Series,
+    scores:  Dict[str, float] = BUY_SCORES,
 ) -> tuple[str, float, bool]:
     """
     返回 (buy_type, raw_score, divergence)。
-    优先级：B3 > B2 > B1。
+    优先级：B3 > B2 > B1。scores 为各买点分值表（美股默认 BUY_SCORES，A股传自己的）。
     """
     last  = strokes[-1]
     price = float(close.iloc[-1])
@@ -316,7 +327,7 @@ def _detect_buy(
                 last.low >= pivot.zg * 0.99 and
                 last.low <= pivot.zg * 1.20 and
                 price >= pivot.zg * 0.99):
-            return "b3", 0.65, False
+            return "b3", scores["b3"], False
 
     # ── B2：价格在中枢内或接近ZD回调，MACD近期曾正值 ──────
     # 约束：价格必须在 ZG 以下（≤ZG×1.05），防止价格远超中枢的假二买
@@ -326,7 +337,7 @@ def _detect_buy(
                 price >= pivot.zd and
                 price <= pivot.zg * 1.05 and   # 价格在中枢内或刚刚突破，不是远超
                 recent_max > 0):
-            return "b2", 0.75, False
+            return "b2", scores["b2"], False
 
     # ── B1：下跌趋势背驰 = 创出新低(延续下跌的最后一段) 但 MACD 面积反而更小 ──
     # 缠论精髓：背驰必须"创新极值 + 力度衰竭"，仅面积更小而未创新低只是弱回调，不算背驰。
@@ -337,7 +348,7 @@ def _detect_buy(
         prev_area = _stroke_area(prev_down, df, hist)
         if (last.low < prev_down.low
                 and prev_area > 1e-6 and curr_area < prev_area * 0.8):
-            return "b1", 0.50, True
+            return "b1", scores["b1"], True
 
     return "none", 0.0, False
 
