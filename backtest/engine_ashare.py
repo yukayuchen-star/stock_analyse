@@ -7,7 +7,8 @@ A 股缠论回测引擎
   - 止损按板块涨跌停缩放（sl_pct_for_board：主板 9%/创业板·科创 18%/北交所 27%），TP 2:1。
   - 预热 WARMUP_BARS=120（每股仅 ~360TD，换取更长回测窗口）。
 
-信号源：extract_chan_events_ashare（背驰用预计算 MACD，无前视）。
+信号源：extract_chan_events_ashare（逐日 as-of 重放实盘发射门，背驰用预计算
+MACD，无前视；2026-07-15 修复幸存者偏差，此前 68.7% 基线作废待重测）。
 复用 engine.py 的 Trade/BacktestResult/_make_trade/_compute_metrics。
 """
 from __future__ import annotations

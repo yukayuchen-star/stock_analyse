@@ -9,7 +9,8 @@ A 股缠论信号层
   3. 牛短熊长保守门控：以二买/三买为主，一买（左侧背驰抄底）严格门控。
 
 实盘选股用 compute_chan_signal_ashare（带保守门控）；
-回测用 extract_chan_events_ashare（不门控，全量发 b1/b2/b3，以便分类型统计胜率）。
+回测用 extract_chan_events_ashare（逐日 as-of 重放，复刻实盘发射门但不做
+保守门控，全量发 b1/b2/b3，以便分类型统计胜率）。
 """
 from __future__ import annotations
 
@@ -353,61 +354,73 @@ def compute_chan_signal_ashare(
                                 reasoning=f"计算异常: {e}")
 
 
-# ── 回测用：逐笔历史事件提取（不门控，全量发信号）────────────────
+# ── 回测用：逐日 as-of 重放事件提取（复刻实盘发射门，无前视）──────
 
 def extract_chan_events_ashare(df: pd.DataFrame) -> List[ChanEvent]:
     """
-    与 chan_signal.extract_chan_events 同构，但背驰用预计算 MACD 柱。
-    无前视：信号在笔结束后的分型停顿确认日触发，仅依赖 ≤该日数据。
-    不做保守门控——回测需要 b1/b2/b3 全量样本以分类型统计胜率。
+    与 chan_signal.extract_chan_events 同构的逐日 as-of 重放（美股 R1.3 修复移植）：
+    对每个交易日只用截至该日的数据重算 分型→笔，复刻实盘
+    compute_chan_signal_ashare 的三重发射门（is_fresh 12交易日 + 分型停顿 +
+    A定笔/C'波动率），门槛首次全部通过之日发出该末笔的信号事件。
+
+    与美股版差异：背驰用预计算 MACD 柱（_hist_series；因果指标按日切片无前视）、
+    is_fresh 按 12 交易日（对齐实盘，避免春节长假误判）、分值 BUY_SCORES_ASHARE。
+    不做牛短熊长保守门控——回测需要 b1/b2/b3 全量样本以分类型统计胜率。
+    （旧实现笔几何来自全量历史回切：被重画的失败笔从统计中消失，
+    存活者偏差使 68.7% 胜率虚高，已废弃。）
     """
     if len(df) < 60:
-        return []
-    try:
-        pbars    = process_bars(df)
-        fractals = detect_fractals(pbars)
-        strokes  = build_strokes(fractals)
-    except Exception:
         return []
 
     full_hist = _hist_series(df)
     events: List[ChanEvent] = []
-    STOP_WAIT = 5
-    for i in range(3, len(strokes)):
-        stroke      = strokes[i]
-        sub_strokes = strokes[: i + 1]
+    seen: set = set()
 
-        end_f     = stroke.end
-        idx_third = end_f.pbar_idx + 1
-        if idx_third >= len(pbars):
+    for t in range(29, len(df)):
+        sub_df = df.iloc[: t + 1]
+        try:
+            pbars    = process_bars(sub_df)
+            fractals = detect_fractals(pbars)
+            strokes  = build_strokes(fractals)
+        except Exception:
             continue
-        third_date = pbars[idx_third].date
-        third_hi   = pbars[idx_third].high
-        third_lo   = pbars[idx_third].low
+        if len(strokes) < 4:
+            continue
 
-        after = df[df.index > third_date].head(STOP_WAIT)
-        if after.empty:
-            continue
-        if end_f.kind == "bottom":
-            mask = after["Close"] >= third_hi
-        elif end_f.kind == "top":
-            mask = after["Close"] <= third_lo
-        else:
-            continue
-        if not mask.any():
-            continue
-        stop_date = after.index[mask.argmax()]
+        last  = strokes[-1]
+        end_f = last.end
 
-        sub_df = df[df.index <= stop_date]
-        if len(sub_df) < 30:
+        # ── 与实盘一致的三重发射门 ──────────────────────────
+        # 1) is_fresh：末笔端点距今 ≤12 交易日（对齐实盘口径）
+        fresh_floor = sub_df.index[-12] if len(sub_df) >= 12 else sub_df.index[0]
+        if last.end_date < fresh_floor:
             continue
+        # 2) A定笔 + C'波动率：终点分型后须再过 confirm_bars 根处理K
+        rng = ((sub_df["High"] - sub_df["Low"])
+               / sub_df["Close"].replace(0, np.nan)).tail(20)
+        atr_pct = float(rng.mean()) if rng.notna().any() else 0.0
+        confirm_bars = STROKE_CONFIRM_BARS + (
+            HIGH_VOL_EXTRA_CONFIRM if atr_pct >= HIGH_VOL_PCT else 0)
+        if (len(pbars) - 1) - end_f.pbar_idx < confirm_bars:
+            continue
+        # 3) 分型停顿（缠论第四章）
+        if not _fractal_stopped(last, pbars, sub_df):
+            continue
+
+        # 同一末笔端点只发一次（门槛通过后连日成立，只取首日）
+        key = (end_f.kind, last.end_date)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        stop_date = sub_df.index[-1]
         sub_close = sub_df["Close"]
         sub_hist  = full_hist.loc[full_hist.index <= stop_date]
-        pivot     = find_latest_pivot(sub_strokes, lookback=12)
-        trend     = _classify_trend(build_all_pivots(sub_strokes[-30:]))
+        pivot     = find_latest_pivot(strokes, lookback=12)
+        trend     = _classify_trend(build_all_pivots(strokes[-30:]))
 
         buy_type, raw_score, _ = _detect_buy(
-            sub_strokes, pivot, sub_hist, sub_df, sub_close,
+            strokes, pivot, sub_hist, sub_df, sub_close,
             scores=BUY_SCORES_ASHARE)
         if buy_type != "none":
             if buy_type == "b1":
@@ -417,7 +430,7 @@ def extract_chan_events_ashare(df: pd.DataFrame) -> List[ChanEvent]:
             continue
 
         sell_type, raw_score, _ = _detect_sell(
-            sub_strokes, pivot, sub_hist, sub_df, sub_close)
+            strokes, pivot, sub_hist, sub_df, sub_close)
         if sell_type != "none":
             if sell_type == "s1":
                 raw_score *= _trend_weight(trend)
