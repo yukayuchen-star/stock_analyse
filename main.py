@@ -233,8 +233,9 @@ def _run_portfolio(decisions: Dict[str, StockDecision],
     """按策略信号推进美股模拟组合一天（不改策略，仅记账）。
 
     买入：Buy/Overweight 且未持仓 → 目标市值 = 建议仓位 × 初始资金。
-    卖出（全部卖出）：评级为 Sell/Underweight，或缠论出现卖点(s1/s2/s3)，或跌破结构止损。
-    成交价 = 信号当日收盘价。
+    卖出（全部卖出）：评级为 Sell/Underweight，或缠论卖点(s1/s2/s3)经迟滞层
+    连续 CONFIRM_DAYS 天确认（chan_sell_confirmed，panic 直通），或跌破结构止损
+    （止损不受迟滞约束，风控优先）。成交价 = 信号当日收盘价。
     """
     _BUY  = {"Buy", "Overweight"}
     _SELL = {"Sell", "Underweight"}
@@ -248,13 +249,11 @@ def _run_portfolio(decisions: Dict[str, StockDecision],
     for ticker, d in decisions.items():
         df = prices.get(ticker)
         price = float(df["Close"].iloc[-1]) if df is not None and not df.empty else 0.0
-        sell_pt = (d.chan_signal.sell_point_type
-                   if d.chan_signal is not None else None)
         signals.append(Signal(
             code=ticker,
             price=price,
             is_buy=(d.rating in _BUY),
-            is_sell=(d.rating in _SELL or sell_pt is not None),
+            is_sell=(d.rating in _SELL or d.chan_sell_confirmed),
             position_frac=d.suggested_position,
             stop_loss=d.stop_loss or 0.0,
             rank=rank_of.get(ticker, 0),
@@ -281,7 +280,8 @@ def _write_portfolio_report(state: dict, prices: Dict, output_dir: Path,
     if cur:
         L += [
             f"> 初始资金 ${initial:,.0f}，从启用日起严格按策略 Buy/卖点信号模拟买卖、跨日追踪。",
-            "> 成交价=信号当日收盘价，仓位=策略建议；持仓出现卖点(Sell/Underweight/s1/s2/s3)或跌破结构止损则全部卖出。",
+            "> 成交价=信号当日收盘价，仓位=策略建议；持仓评级转Sell/Underweight、"
+            "缠论卖点(s1/s2/s3)连续2天确认（panic直通）、或跌破结构止损则全部卖出。",
             "",
             "| 项目 | 值 |", "|--|--|",
             f"| 总权益 | ${cur['equity']:,.2f} |",

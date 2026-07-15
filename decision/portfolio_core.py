@@ -110,8 +110,10 @@ def update_portfolio(state: dict, date_str: str, signals: List[Signal],
             del positions[code]
 
     # ── 2. 再买（按排名优先，受现金约束）──
+    # 同票当日既有卖出信号又有买入评级 → 以卖为准，当日不回补（防卖后即买的洗仓）
     buys = sorted([s for s in signals
-                   if s.is_buy and s.code not in positions and s.price > 0],
+                   if s.is_buy and not s.is_sell
+                   and s.code not in positions and s.price > 0],
                   key=lambda s: (s.rank if s.rank else 1e9))
     for s in buys:
         target_value = max(0.0, s.position_frac) * initial

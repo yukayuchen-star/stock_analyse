@@ -99,8 +99,10 @@ def apply_risk_overlay(
     # ── 止损/止盈：优先用缠论结构止损；无结构止损时退回 VIX 百分比兜底 ──
     # 结构止损(chan.stop_loss)由 _calc_stop_and_r 基于笔低/中枢上沿计算，
     # 比"当前价×固定百分比"更贴近缠论逻辑且与入场区间同一套坐标。
+    # 多头止损必须低于现价：缠论卖点(s1/s2/s3)的结构止损在现价上方（末笔高/ZD×1.01），
+    # 宏观强正把 final_score 抬正时会走到此分支，此时不可采用，退回百分比兜底。
     if final_score > 0 and current_price > 0:
-        if chan.stop_loss:
+        if chan.stop_loss and chan.stop_loss < current_price:
             stop_loss   = round(chan.stop_loss, 2)
             risk_amount = current_price - stop_loss
             take_profit = round(current_price + risk_amount * _TP_RATIO, 2)

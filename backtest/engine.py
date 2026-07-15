@@ -237,7 +237,7 @@ def run_backtest(ticker: str, df: pd.DataFrame) -> BacktestResult:
     backtest_df    = df[df.index >= backtest_start].copy()
     short_history  = len(backtest_df) < 300  # 回测区间不足 300 TD，结论参考性有限
 
-    # 提取信号（使用全量数据，无前视偏差）
+    # 提取信号（逐日 as-of 重算结构，无前视偏差）
     all_events = extract_chan_events(df)
     events     = [e for e in all_events if e.date >= backtest_start]
 

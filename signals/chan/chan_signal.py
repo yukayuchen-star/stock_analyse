@@ -94,59 +94,66 @@ class ChanEvent:
 
 def extract_chan_events(df: pd.DataFrame) -> List[ChanEvent]:
     """
-    对完整历史 DataFrame 进行一次笔结构分析，
-    在每根笔完成时（仅用截至该日的数据）提取信号事件。
+    逐日重放（as-of）：对每个交易日只用截至该日的数据重算 分型→笔 结构，
+    并复刻实盘 compute_chan_signal 的三重发射门（is_fresh 15日 + 分型停顿
+    + A定笔/C'波动率），在门槛首次全部通过之日发出该末笔的信号事件。
 
-    无前视偏差：信号在笔结束日触发，仅依赖该日及之前数据。
+    无前视偏差：包含关系合并、分型清洗、笔划分均仅依赖截至当日数据。
+    （旧实现的笔几何来自全量历史 process_bars 后回切：未来K线可通过包含
+    合并/分型清洗改写右端结构，且只统计"存活到最终几何"的笔——存活者偏差
+    使胜率虚高，已废弃。）
     用于 P7 回测引擎，返回按日期升序排列的事件列表。
     """
     if len(df) < 60:
         return []
-    try:
-        pbars    = process_bars(df)
-        fractals = detect_fractals(pbars)
-        strokes  = build_strokes(fractals)
-    except Exception:
-        return []
 
     events: List[ChanEvent] = []
-    STOP_WAIT = 5  # 分型形成后最多等 5 个交易日做停顿确认
-    for i in range(3, len(strokes)):
-        stroke      = strokes[i]
-        sub_strokes = strokes[: i + 1]
+    seen: set = set()
 
-        # 找停顿确认日：分型第三根 PBar 之后第一根 close 站住的 raw bar
-        end_f      = stroke.end
-        idx_third  = end_f.pbar_idx + 1
-        if idx_third >= len(pbars):
+    for t in range(29, len(df)):          # 与旧实现 sub_df>=30 门槛对齐
+        sub_df = df.iloc[: t + 1]
+        try:
+            pbars    = process_bars(sub_df)
+            fractals = detect_fractals(pbars)
+            strokes  = build_strokes(fractals)
+        except Exception:
             continue
-        third_date = pbars[idx_third].date
-        third_hi   = pbars[idx_third].high
-        third_lo   = pbars[idx_third].low
+        if len(strokes) < 4:              # 与旧实现跳过前 3 笔对齐
+            continue
 
-        after = df[(df.index > third_date)].head(STOP_WAIT)
-        if after.empty:
-            continue
-        if end_f.kind == "bottom":
-            mask = after["Close"] >= third_hi
-        elif end_f.kind == "top":
-            mask = after["Close"] <= third_lo
-        else:
-            continue
-        if not mask.any():
-            continue
-        stop_date = after.index[mask.argmax()]
+        last  = strokes[-1]
+        end_f = last.end
 
-        sub_df    = df[df.index <= stop_date]
-        if len(sub_df) < 30:
+        # ── 与实盘一致的三重发射门 ──────────────────────────
+        # 1) is_fresh：末笔端点距今 ≤15 日历日
+        if last.end_date < sub_df.index[-1] - pd.Timedelta(days=15):
             continue
+        # 2) A定笔 + C'波动率：终点分型后须再过 confirm_bars 根处理K
+        rng = ((sub_df["High"] - sub_df["Low"])
+               / sub_df["Close"].replace(0, np.nan)).tail(20)
+        atr_pct  = float(rng.mean()) if rng.notna().any() else 0.0
+        confirm_bars = STROKE_CONFIRM_BARS + (
+            HIGH_VOL_EXTRA_CONFIRM if atr_pct >= HIGH_VOL_PCT else 0)
+        if (len(pbars) - 1) - end_f.pbar_idx < confirm_bars:
+            continue
+        # 3) 分型停顿（缠论第四章）
+        if not _fractal_stopped(last, pbars, sub_df):
+            continue
+
+        # 同一末笔端点只发一次（门槛通过后连日成立，只取首日）
+        key = (end_f.kind, last.end_date)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        stop_date = sub_df.index[-1]
         sub_close = sub_df["Close"]
         sub_hist  = _macd_hist(sub_close)
-        pivot     = find_latest_pivot(sub_strokes, lookback=12)
-        trend     = _classify_trend(build_all_pivots(sub_strokes[-30:]))
+        pivot     = find_latest_pivot(strokes, lookback=12)
+        trend     = _classify_trend(build_all_pivots(strokes[-30:]))
 
         buy_type, raw_score, _ = _detect_buy(
-            sub_strokes, pivot, sub_hist, sub_df, sub_close)
+            strokes, pivot, sub_hist, sub_df, sub_close)
         if buy_type != "none":
             if buy_type == "b1":
                 raw_score *= _trend_weight(trend)
@@ -155,7 +162,7 @@ def extract_chan_events(df: pd.DataFrame) -> List[ChanEvent]:
             continue
 
         sell_type, raw_score, _ = _detect_sell(
-            sub_strokes, pivot, sub_hist, sub_df, sub_close)
+            strokes, pivot, sub_hist, sub_df, sub_close)
         if sell_type != "none":
             if sell_type == "s1":
                 raw_score *= _trend_weight(trend)

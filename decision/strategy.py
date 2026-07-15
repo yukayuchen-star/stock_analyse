@@ -44,6 +44,10 @@ class StockDecision:
     risk_flags:      List[str] = field(default_factory=list)
     score_reasoning: str       = ""
 
+    # 迟滞层(B)裁定：缠论卖点连续 CONFIRM_DAYS 天确认（或 VIX panic 直通）才为 True，
+    # 组合层仅在确认后才执行卖点清仓（apply_hysteresis 填写）
+    chan_sell_confirmed: bool = False
+
 
 def make_decision(
     ticker: str,
