@@ -256,6 +256,19 @@ flowchart TD
 
 ### R2 — 可调度性（对应缺陷 #4-#5，达成「每日自动运行」目标）
 
+> **✅ R2 实施状态（2026-07-16）**：R2.1 + R2.2 已实施并通过验收（23 项单测 + 端到端非交互跑通）。
+> - **R2.1**：argparse `--non-interactive`（非 TTY 自动启用）/ `--auto-adopt-adds N`（默认 0=仅记录）/
+>   `--date`（补跑标签，数据仍为当前抓取，已在 --help 中如实说明）；`_non_interactive_pool_update`
+>   自动采纳 Top-N、**removes 一律仅记录不执行**（保守）；`watchlist_us.txt` 人工强制关注
+>   （`pool_manager.load_us_watchlist`，与 A 股 watchlist.txt 同格式，gitignore 不入库），
+>   两种模式均在流程起点并入 dynamic_pool（source="watchlist"）。异常退出码 1、--date 格式错 2。
+> - **R2.2**：`utils/time_utils` 内置规则法 NYSE 假日（含复活节/observed 移位/元旦落周六不补休特例，
+>   2025/2026 与官方日历逐日核对一致），`is_trading_day` + `prev_trading_day` 升级；
+>   非交易日：非交互模式 0.3s 快速退出（码 0，cron 不误报），TTY 模式警告后继续（保留周末人工复盘用法）。
+> - **顺带修复**：验收跑发现 Wikipedia Nasdaq-100 主条目 2026-07 改版后不含成分表 →
+>   `_NDX_URL` 改指专页 `List_of_NASDAQ-100_companies`；且 universe 抓取失败降级为
+>   「本次无 add 候选」warning，不再终止主流程（缺陷 #10 相邻问题，完整 DEGRADED 贯穿仍属 R3.2）。
+
 **R2.1 非交互模式与池变更落地**
 - 需求：`main.py` 增加 argparse：`--non-interactive`（默认在非 TTY 自动启用）、`--auto-adopt-adds N`（自动采纳 Top-N 加池候选，0=仅记录）、`--date YYYY-MM-DD`（补跑）；
   平移 A 股 `watchlist.txt` 先例为 `watchlist_us.txt`（人工强制关注列表，与筛选合并去重）；removes 建议默认仅记录不自动执行（保守）。

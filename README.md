@@ -38,8 +38,22 @@ EOF
 python main.py                 # US selection → output/YYYY-MM-DD/
 ```
 
-`main.py` is interactive by default for pool edits (it prompts on a TTY). Non-TTY scheduling
-support is planned — see [PRD.md](PRD.md) R2.
+`main.py` is interactive on a TTY (pool editor prompts) and fully schedulable otherwise:
+
+```bash
+python main.py --non-interactive                      # cron path: no prompts, exit 0 on
+                                                      # non-trading days (NYSE calendar built in)
+python main.py --non-interactive --auto-adopt-adds 3  # auto-adopt Top-3 add candidates
+                                                      # (default 0 = record-only; removes are
+                                                      #  always record-only, never auto-executed)
+python main.py --date 2026-07-14                      # backfill label (data still fetched as-of now)
+
+# Example crontab: every weekday 18:30 local, after US close data settles
+# 30 18 * * 1-5  cd /path/to/stock_analyse && ./.venv/bin/python main.py --non-interactive
+```
+
+`watchlist_us.txt` (gitignored, same format as the A-share `watchlist.txt`) force-includes
+tickers into the analysis pool in both modes.
 
 | Command | Purpose |
 |---------|---------|
