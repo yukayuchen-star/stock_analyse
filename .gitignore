@@ -89,3 +89,4 @@ CLAUDE.md
 
 watchlist.txt  # 用户个人关注股票列表（个人数据，不入库）
 holdings.txt  # 用户个人持仓（个人数据，不入库）
+watchlist_us.txt  # 美股人工关注列表（个人数据，不入库）

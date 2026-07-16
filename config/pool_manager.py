@@ -23,8 +23,34 @@ from loguru import logger
 from config.settings import settings
 
 
-_HISTORY_FILE = Path("pool_history.jsonl")
-_OUTPUT_ROOT  = Path(settings.output_dir)
+_HISTORY_FILE      = Path("pool_history.jsonl")
+_OUTPUT_ROOT       = Path(settings.output_dir)
+_WATCHLIST_US_FILE = Path("watchlist_us.txt")
+
+
+def load_us_watchlist(path: Path = _WATCHLIST_US_FILE) -> List[str]:
+    """
+    读美股人工强制关注列表（R2.1，平移 A 股 watchlist.txt 先例）。
+
+    格式：# 开头为注释；ticker 逗号或空白分隔。返回去重大写列表。
+    无效条目（^指数、纯数字、非字母数字）跳过并告警；文件不存在返回空。
+    """
+    if not path.exists():
+        return []
+    out: List[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0]
+        for raw in line.replace(",", " ").split():
+            t = raw.strip().upper()
+            clean = t.replace(".", "").replace("-", "")
+            if t.startswith("^") or not clean.isalnum() or clean.isdigit():
+                logger.warning(f"[Pool] watchlist_us 无效条目跳过: {t}")
+                continue
+            if t not in out:
+                out.append(t)
+    if out:
+        logger.info(f"[Pool] watchlist_us.txt 读取 {len(out)} 只: {', '.join(out)}")
+    return out
 
 
 # ── 加载 ────────────────────────────────────────────────────────
@@ -89,7 +115,7 @@ class PoolChange:
     ticker:  str
     reason:  str
     score:   Optional[float] = None
-    source:  str = "user"   # "user" | "auto-screen"
+    source:  str = "user"   # "user" | "auto-screen" | "watchlist"
 
 
 def append_pool_changes(changes: List[PoolChange]) -> None:

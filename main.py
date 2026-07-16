@@ -1,7 +1,9 @@
+import argparse
 import copy
 import sys
+from datetime import date
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from loguru import logger
 
 import utils.logger  # 触发 setup_logger()
@@ -11,7 +13,8 @@ from config.stocks     import (
     PORTFOLIO_INITIAL_CAPITAL, PORTFOLIO_LOT_SIZE,
 )
 from config.pool_manager import (
-    PoolChange, append_pool_changes, load_dynamic_pool, save_pool_snapshot,
+    PoolChange, append_pool_changes, load_dynamic_pool, load_us_watchlist,
+    save_pool_snapshot,
 )
 from data.pipeline import DataPipeline
 from data.universe import get_universe
@@ -32,7 +35,7 @@ from backtest.report             import write_backtest_report
 from backtest.forward_tracker    import (
     log_signals, evaluate_pending, write_forward_report,
 )
-from utils.time_utils   import today_str, prev_trading_day
+from utils.time_utils   import today_str, prev_trading_day, is_trading_day
 from utils.housekeeping import cleanup_old_files
 
 
@@ -104,13 +107,15 @@ def _interactive_pool_editor(
     buckets: Dict[str, List[str]],
     add_candidates: List[ScreeningCandidate],
     remove_candidates: List[ScreeningCandidate],
+    date_str: Optional[str] = None,
 ) -> Tuple[List[str], List[str], Dict[str, List[str]], List[PoolChange]]:
     """
     展示候选 + 当前池，让用户决定 add/remove。
     返回 (final_pool, new_dynamic, new_buckets, changes_log)。
-    非 TTY 时直接返回当前池，不接受任何候选。
+    非 TTY 时直接返回当前池，不接受任何候选（安全兜底；cron 路径
+    应走 _non_interactive_pool_update）。
     """
-    date_str     = today_str()
+    date_str     = date_str or today_str()
     dynamic_pool = list(dynamic_pool)
     buckets      = copy.deepcopy(buckets)
     changes: List[PoolChange] = []
@@ -225,6 +230,67 @@ def _interactive_pool_editor(
     return final_pool, dynamic_pool, buckets, changes
 
 
+def _merge_watchlist(
+    core_pool: List[str],
+    dynamic_pool: List[str],
+    buckets: Dict[str, List[str]],
+    date_str: str,
+) -> List[PoolChange]:
+    """watchlist_us.txt 人工强制关注 → 并入 dynamic_pool（就地修改），返回变更记录。"""
+    changes: List[PoolChange] = []
+    for ticker in load_us_watchlist():
+        if ticker in core_pool or ticker in dynamic_pool:
+            continue
+        dynamic_pool.append(ticker)
+        buckets.setdefault("custom", []).append(ticker)
+        changes.append(PoolChange(
+            date=date_str, action="add", ticker=ticker,
+            reason="watchlist_us.txt 人工关注", source="watchlist",
+        ))
+        logger.info(f"  + {ticker} ← watchlist_us.txt → dynamic_pool [custom]")
+    return changes
+
+
+def _non_interactive_pool_update(
+    core_pool: List[str],
+    dynamic_pool: List[str],
+    buckets: Dict[str, List[str]],
+    add_candidates: List[ScreeningCandidate],
+    remove_candidates: List[ScreeningCandidate],
+    adopt_n: int,
+    date_str: str,
+) -> Tuple[List[str], List[str], Dict[str, List[str]], List[PoolChange]]:
+    """
+    非交互池更新（R2.1，cron 路径）：
+      - add 候选：自动采纳 Top-N（adopt_n=0 时仅记录），进 dynamic [custom]；
+      - remove 候选：一律仅记录不执行——移除会丢跟踪历史，保守留给人工决定。
+    """
+    dynamic_pool = list(dynamic_pool)
+    buckets      = copy.deepcopy(buckets)
+    changes: List[PoolChange] = []
+    n = max(0, adopt_n)
+
+    for c in add_candidates[:n]:
+        if c.ticker in core_pool or c.ticker in dynamic_pool:
+            continue
+        dynamic_pool.append(c.ticker)
+        buckets.setdefault("custom", []).append(c.ticker)
+        changes.append(PoolChange(
+            date=date_str, action="add", ticker=c.ticker,
+            reason=c.reasoning, score=c.score, source="auto-screen",
+        ))
+        logger.info(f"  + {c.ticker} 自动采纳 Top-{n} (score={c.score:+.3f})")
+    for c in add_candidates[n:]:
+        logger.info(f"  · add 候选仅记录: {c.ticker} score={c.score:+.3f}  {c.reasoning}")
+    for c in remove_candidates:
+        logger.info(f"  · remove 候选仅记录（非交互不执行）: {c.ticker} "
+                    f"score={c.score:+.3f}  {c.reasoning}")
+
+    buckets    = {k: v for k, v in buckets.items() if v}
+    final_pool = sorted(set(core_pool) | set(dynamic_pool))
+    return final_pool, dynamic_pool, buckets, changes
+
+
 _PORTFOLIO_PATH = Path(settings.output_dir) / "us_portfolio.json"
 
 
@@ -327,17 +393,30 @@ def _write_portfolio_report(state: dict, prices: Dict, output_dir: Path,
 
 # ── 主流程 ──────────────────────────────────────────────────────
 
-def run() -> None:
-    date_str   = today_str()
+def run(non_interactive: bool = False,
+        adopt_n: int = 0,
+        run_date: Optional[str] = None) -> None:
+    date_str = run_date or today_str()
+    ref_date = date.fromisoformat(date_str)
+
+    # ── 交易日门（R2.2）：非交易日 cron 快速退出（0），TTY 提示后继续 ──
+    if not is_trading_day(ref_date):
+        if non_interactive:
+            logger.info(f"{date_str} 非美股交易日（周末/NYSE 假日），跳过本次运行")
+            return
+        logger.warning(f"{date_str} 非美股交易日，交互模式继续（分析基准=最近交易日收盘）")
+
     output_dir = Path(settings.output_dir) / date_str
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 清理 7 天前的缓存与输出 ────────────────────────────
     cleanup_old_files()
 
-    # ── 加载 core + dynamic ────────────────────────────────
+    # ── 加载 core + dynamic + watchlist_us（R2.1 人工强制关注）──
     core_pool    = list(STOCK_POOL)
     dynamic_pool = load_dynamic_pool()
+    buckets      = copy.deepcopy(BUCKETS)
+    wl_changes   = _merge_watchlist(core_pool, dynamic_pool, buckets, date_str)
     current_pool = sorted(set(core_pool) | set(dynamic_pool))
     logger.info(f"启动池: core={len(core_pool)} dynamic={len(dynamic_pool)} 合并={len(current_pool)}")
 
@@ -363,7 +442,7 @@ def run() -> None:
     logger.info(f"{'='*50}")
     logger.info(f"美股量化分析系统  {date_str}")
     logger.info(f"{'='*50}")
-    logger.info(f"数据基准日 (t-1): {prev_trading_day()}")
+    logger.info(f"数据基准日 (t-1): {prev_trading_day(ref_date)}")
 
     data         = pipeline.fetch_all(stock_pool=current_pool)
     prices       = data["prices"]
@@ -377,7 +456,7 @@ def run() -> None:
     )
 
     logger.info("── P2 量化（current_pool）──")
-    quant_init = _run_quant_for_pool(current_pool, BUCKETS, prices, fundamentals)
+    quant_init = _run_quant_for_pool(current_pool, buckets, prices, fundamentals)
     logger.info("── P4 缠论（current_pool）──")
     chan_init  = _run_chan_for_pool(current_pool, prices)
 
@@ -388,14 +467,27 @@ def run() -> None:
         dynamic_pool=dynamic_pool,
     )
 
-    # ── 编辑器：展示 + 用户确认 ──────────────────────────
-    final_pool, new_dynamic, buckets, changes = _interactive_pool_editor(
-        core_pool=core_pool,
-        dynamic_pool=dynamic_pool,
-        buckets=BUCKETS,
-        add_candidates=add_cands,
-        remove_candidates=remove_cands,
-    )
+    # ── 池变更落地：TTY 交互编辑器 / cron 非交互更新（R2.1）──────
+    if non_interactive:
+        final_pool, new_dynamic, buckets, changes = _non_interactive_pool_update(
+            core_pool=core_pool,
+            dynamic_pool=dynamic_pool,
+            buckets=buckets,
+            add_candidates=add_cands,
+            remove_candidates=remove_cands,
+            adopt_n=adopt_n,
+            date_str=date_str,
+        )
+    else:
+        final_pool, new_dynamic, buckets, changes = _interactive_pool_editor(
+            core_pool=core_pool,
+            dynamic_pool=dynamic_pool,
+            buckets=buckets,
+            add_candidates=add_cands,
+            remove_candidates=remove_cands,
+            date_str=date_str,
+        )
+    changes = wl_changes + changes
 
     # ── 池如有变化：补抓 delta + 复跑 quant/chan ──────────
     if set(final_pool) != set(current_pool):
@@ -541,5 +633,32 @@ def _score_bar(score: float, width: int = 10) -> str:
     return "[" + "█" * filled + "░" * (width - filled) + "]"
 
 
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="美股量化分析系统（缠论×宏观×量化）——每日选股与报告")
+    p.add_argument("--non-interactive", action="store_true",
+                   help="跳过交互式池编辑器（非 TTY 环境自动启用）；"
+                        "非交易日直接退出（退出码 0）")
+    p.add_argument("--auto-adopt-adds", type=int, default=0, metavar="N",
+                   help="非交互模式自动采纳 Top-N 加池候选（默认 0=仅记录不采纳）")
+    p.add_argument("--date", default=None, metavar="YYYY-MM-DD",
+                   help="补跑日期标签：产物写入 output/<date>/；"
+                        "注意数据仍为当前抓取，非历史 as-of 重建")
+    return p.parse_args()
+
+
 if __name__ == "__main__":
-    run()
+    args = _parse_args()
+    if args.date:
+        try:
+            date.fromisoformat(args.date)
+        except ValueError:
+            logger.error(f"--date 格式无效: {args.date}（需 YYYY-MM-DD）")
+            sys.exit(2)
+    try:
+        run(non_interactive=args.non_interactive or not sys.stdin.isatty(),
+            adopt_n=args.auto_adopt_adds,
+            run_date=args.date)
+    except Exception:
+        logger.exception("运行异常退出")
+        sys.exit(1)
