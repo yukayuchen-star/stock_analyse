@@ -2,6 +2,7 @@ import pandas as pd
 from fredapi import Fred
 from loguru import logger
 
+from data.base  import with_retry
 from data.cache import SQLiteCache
 from config.settings import settings
 
@@ -48,7 +49,10 @@ class FREDSource:
             return cached
 
         try:
-            s = self._get_client().get_series(series_id)
+            s = with_retry(
+                lambda: self._get_client().get_series(series_id),
+                label=f"FRED({series_id})",
+            )
             df = pd.DataFrame({"value": s})
             df.index = pd.to_datetime(df.index)
             df = df.dropna()

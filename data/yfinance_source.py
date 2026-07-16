@@ -4,6 +4,7 @@ import pandas as pd
 import yfinance as yf
 from loguru import logger
 
+from data.base  import with_retry
 from data.cache import SQLiteCache
 
 
@@ -29,9 +30,12 @@ class YFinanceSource:
             return cached
 
         try:
-            df = yf.download(
-                ticker, start=start, end=end,
-                auto_adjust=True, progress=False, multi_level_index=False,
+            df = with_retry(
+                lambda: yf.download(
+                    ticker, start=start, end=end,
+                    auto_adjust=True, progress=False, multi_level_index=False,
+                ),
+                label=f"yf.download({ticker})",
             )
         except Exception as e:
             logger.warning(f"yfinance download error [{ticker}]: {e}")

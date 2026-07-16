@@ -18,12 +18,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from loguru import logger
+
+from config.settings import settings
+from data.cache import SQLiteCache
+from data.yfinance_source import YFinanceSource
 
 
 # ── 常量 ────────────────────────────────────────────────────────
@@ -96,10 +100,26 @@ def _zscore_latest(series: pd.Series, window: int = _HIST) -> float:
     return float(z) if np.isfinite(z) else 0.0
 
 
-def _fetch_price_series(ticker: str, period: str = "2y") -> pd.Series:
-    """下载收盘价 Series，出错返回空 Series。"""
+# R3.1：油/美元改走 YFinanceSource（SQLiteCache 1 天 TTL + 统一重试），
+# 不再每次 run 直连 yf.download——同日重跑命中缓存，输出可复现。
+_yf_source: Optional[YFinanceSource] = None
+
+
+def _get_source() -> YFinanceSource:
+    global _yf_source
+    if _yf_source is None:
+        _yf_source = YFinanceSource(SQLiteCache(settings.cache_dir))
+    return _yf_source
+
+
+def _fetch_price_series(ticker: str, days: int = 730) -> pd.Series:
+    """取收盘价 Series（经缓存+重试），出错返回空 Series。"""
     try:
-        df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+        # end=今日（yf 排他）→ 最后一根为 t-1 已完成K线，对齐全系统无前视口径；
+        # 旧 period="2y" 会混入今日盘中未完成 bar，同日重跑不可复现。
+        end   = date.today()
+        start = end - timedelta(days=days)
+        df = _get_source().get_price(ticker, start.isoformat(), end.isoformat())
         if df.empty:
             return pd.Series(dtype=float)
         close = df["Close"]
@@ -107,7 +127,7 @@ def _fetch_price_series(ticker: str, period: str = "2y") -> pd.Series:
         # 破坏后续 len()/iloc。squeeze(axis=1) 保证始终返回 Series。
         return close.squeeze(axis=1) if isinstance(close, pd.DataFrame) else close
     except Exception as exc:
-        logger.warning(f"[ExtMacro] {ticker} 下载失败: {exc}")
+        logger.warning(f"[ExtMacro] {ticker} 获取失败: {exc}")
         return pd.Series(dtype=float)
 
 
