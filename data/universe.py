@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from io import StringIO
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 import requests
@@ -77,6 +77,26 @@ def _fetch_marketcap(tickers: List[str], max_workers: int = 10) -> dict[str, flo
     return caps
 
 
+# R3.3：marketCap 失败率超过此值视为数据源异常，回退最近历史缓存
+_MCAP_FAIL_MAX = 0.20
+
+
+def _latest_prev_cache() -> Optional[List[str]]:
+    """返回今日之前最近一份 universe 缓存的 tickers；无则 None。"""
+    candidates = sorted(_CACHE_DIR.glob("*.json"))
+    for f in reversed(candidates):
+        if f.stem >= today_str():
+            continue
+        try:
+            tickers = json.loads(f.read_text()).get("tickers", [])
+            if tickers:
+                logger.warning(f"[Universe] 复用历史缓存 {f.name}（{len(tickers)} 只）")
+                return tickers
+        except Exception:
+            continue
+    return None
+
+
 def get_universe(
     nasdaq_top: int = 30,
     force_refresh: bool = False,
@@ -85,6 +105,7 @@ def get_universe(
     返回 S&P 500 ∪ Nasdaq-100 Top{nasdaq_top} by market cap，去重。
 
     每日缓存到 cache/universe/<YYYY-MM-DD>.json。
+    marketCap 失败率 >20% 时告警并复用上一日缓存（R3.3），不再静默置 0。
     """
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_file = _CACHE_DIR / f"{today_str()}.json"
@@ -107,6 +128,18 @@ def get_universe(
 
     logger.info(f"[Universe] 取 Nasdaq Top {nasdaq_top} by market cap ...")
     caps = _fetch_marketcap(ndx)
+
+    # R3.3：失败率门控——大面积失败时 Top-N 排名不可信
+    fail_rate = 1.0 - len(caps) / max(1, len(ndx))
+    if fail_rate > _MCAP_FAIL_MAX:
+        logger.warning(
+            f"[Universe] marketCap 失败率 {fail_rate:.0%} > {_MCAP_FAIL_MAX:.0%}"
+            f"（{len(ndx) - len(caps)}/{len(ndx)} 只失败），Top{nasdaq_top} 排名不可信")
+        prev = _latest_prev_cache()
+        if prev is not None:
+            return prev          # 不写今日缓存，下次运行可重试抓取
+        logger.warning("[Universe] 无历史缓存可回退，按部分数据继续（排名可能有偏）")
+
     ndx_top = [t for t, _ in sorted(caps.items(), key=lambda x: x[1], reverse=True)[:nasdaq_top]]
     logger.info(f"[Universe]   Nasdaq Top{nasdaq_top}: {ndx_top[:10]}...")
 
