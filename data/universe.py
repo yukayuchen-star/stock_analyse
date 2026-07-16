@@ -26,7 +26,8 @@ from utils.time_utils import today_str
 
 _CACHE_DIR = Path("cache") / "universe"
 _SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-_NDX_URL   = "https://en.wikipedia.org/wiki/Nasdaq-100"
+# 成分表在专页（Nasdaq-100 主条目已不含成分表，2026-07 页面改版）
+_NDX_URL   = "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies"
 _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
 

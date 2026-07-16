@@ -430,7 +430,12 @@ def run(non_interactive: bool = False,
         logger.info("  [ForwardTracker] 暂无到期待评估信号")
 
     logger.info("── universe 扫描（add 候选）──")
-    universe   = get_universe(nasdaq_top=30)
+    # universe 仅服务 add 候选筛选，失败不应终止每日主流程（R2 调度健壮性）
+    try:
+        universe = get_universe(nasdaq_top=30)
+    except Exception as e:
+        logger.warning(f"universe 扫描失败（{e}），本次无 add 候选，主流程继续")
+        universe = []
     add_cands  = screen_for_adds(
         pipeline=pipeline,
         universe=universe,
