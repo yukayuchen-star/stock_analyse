@@ -44,6 +44,9 @@ class QuantSignalResult:
     relative_strength_score: float = 0.0
     volume_score:            float = 0.0
 
+    # 各子因子数据可用性（R3.2）：False=计算异常回退 0 分（错误≠真中性）
+    factor_ok: Dict[str, bool] = field(default_factory=dict)
+
     # 合成得分
     score:     float = 0.0       # -1~1，正多负空
     trend:     str   = "neutral" # "up" | "down" | "neutral"
@@ -73,14 +76,17 @@ def compute_quant_signal(
         return QuantSignalResult(ticker=ticker, reasoning="无价格数据")
 
     all_ind: Dict[str, float] = {}
+    factor_ok: Dict[str, bool] = {}
 
     def _run(name: str, fn, *args):
         try:
             score, ind = fn(*args)
             all_ind.update({f"{name}_{k}": v for k, v in ind.items() if isinstance(v, (int, float))})
+            factor_ok[name] = True
             return float(score)
         except Exception as e:
             logger.warning(f"[Quant] {name} error [{ticker}]: {e}")
+            factor_ok[name] = False   # R3.2：错误回退 0 分 ≠ 真中性，显式标记
             return 0.0
 
     f = _run("fund",  compute_fundamental_score,       ticker, info or {})
@@ -88,6 +94,8 @@ def compute_quant_signal(
     m = _run("mom",   compute_momentum_score,           df)
     r = _run("rel",   compute_relative_strength_score,  ticker, prices, bucket_tickers)
     v = _run("vol",   compute_volume_score,             df)
+    if not info:
+        factor_ok["fund"] = False    # 无基本面数据：0 分是缺数据不是中性评价
 
     score = float(np.clip(
         W_FUND * f + W_TREND * t + W_MOM * m + W_REL * r + W_VOL * v,
@@ -104,10 +112,14 @@ def compute_quant_signal(
         f"vol={v:+.2f}({W_VOL:.0%}) "
         f"→ score={score:+.3f} [{trend}]"
     )
+    bad = [k for k, ok in factor_ok.items() if not ok]
+    if bad:
+        reasoning += f" ⚠️因子降级[{','.join(bad)}]"
 
     return QuantSignalResult(
         ticker=ticker,
         indicators=all_ind,
+        factor_ok=factor_ok,
         fundamental_score=f,
         trend_score=t,
         momentum_score=m,

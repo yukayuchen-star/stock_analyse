@@ -19,6 +19,13 @@ FRED_SERIES: dict[str, str] = {
 
 TTL_MACRO = 24  # 宏观数据缓存 1 天
 
+# R3.2 数据新鲜度阈值（日历日）：最新数据点距今超过该值视为 STALE。
+# 日频序列容 2 个交易日延迟（周末+假日 ≈ 5 日历日）；月频序列 45 天。
+STALE_LIMIT_DAYS: dict[str, int] = {
+    "VIXCLS": 5, "DGS10": 5, "DGS2": 5, "T10YIE": 5,
+    "FEDFUNDS": 45, "CPIAUCSL": 45, "UNRATE": 45,
+}
+
 
 class FREDSource:
     """宏观数据源：美联储经济数据库（免费无限制）。"""
@@ -69,6 +76,24 @@ class FREDSource:
         if df.empty:
             return None
         return float(df["value"].iloc[-1])
+
+    def get_latest_dated(self, series_id: str) -> tuple[float, pd.Timestamp] | None:
+        """返回 (最新值, 数据点日期)，供新鲜度校验（R3.2）。"""
+        df = self.get_macro(series_id)
+        if df.empty:
+            return None
+        return float(df["value"].iloc[-1]), pd.Timestamp(df.index[-1])
+
+    @staticmethod
+    def staleness(series_id: str, data_date: pd.Timestamp) -> str | None:
+        """按序列阈值判断新鲜度：过期返回 'FRED_STALE:<sid>(<n>d)'，否则 None。"""
+        limit = STALE_LIMIT_DAYS.get(series_id)
+        if limit is None:
+            return None
+        age = (pd.Timestamp.now().normalize() - data_date.normalize()).days
+        if age > limit:
+            return f"FRED_STALE:{series_id}({age}d>{limit}d)"
+        return None
 
     def get_all(self) -> dict[str, pd.DataFrame]:
         """批量获取所有关注序列。"""

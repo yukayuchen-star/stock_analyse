@@ -53,6 +53,10 @@ class MacroSignalResult:
     # 外部因子（油价/加息预期/美元/通胀）
     external: ExternalFactorsResult = field(default_factory=ExternalFactorsResult)
 
+    # 数据降级项（R3.2）：FRED 缺失/过期 + 外部因子不可用 + VIX/利差回退，
+    # 非空时报告头部必须展示——禁止静默中性化后照常给建议不留痕。
+    degraded: list = field(default_factory=list)
+
     # 综合
     score:     float = 0.0   # -1~1
     reasoning: str   = ""
@@ -64,6 +68,7 @@ def compute_macro_signal(
     snapshot: Dict[str, float],
     prices:   Dict[str, pd.DataFrame],
     buckets:  Dict[str, list],
+    degraded: list | None = None,
 ) -> MacroSignalResult:
     """
     计算宏观信号。
@@ -72,11 +77,15 @@ def compute_macro_signal(
         snapshot: FRED 最新值快照 {series_id: float}，含 VIXCLS / DGS10 / DGS2
         prices:   全股票池价格字典（含 QQQ），用于桶强度计算
         buckets:  BUCKETS 配置 {bucket_name: [ticker, ...]}
+        degraded: 数据层已知降级项（pipeline.get_macro_snapshot 的第二返回值）
     """
+    degraded = list(degraded or [])
+
     # ── 1. VIX 制度 ──────────────────────────────────────────
     vix = snapshot.get("VIXCLS")
     if vix is None:
         logger.warning("[Macro] VIXCLS 缺失，使用默认 VIX=20")
+        degraded.append("VIX_MISSING(按VIX=20处理,仓位上限70%)")
         vix = 20.0
 
     regime: VIXRegime = classify_vix(vix)
@@ -88,6 +97,7 @@ def compute_macro_signal(
 
     if dgs10 is None or dgs2 is None:
         logger.warning("[Macro] 国债收益率数据缺失，yield_score=0")
+        degraded.append("YIELD_MISSING(DGS10/DGS2缺失,yield_score=0)")
         spread      = 0.0
         yield_score = 0.0
     else:
@@ -98,6 +108,7 @@ def compute_macro_signal(
     # ── 3. 外部因子（油价 / 加息预期 / 美元 / 通胀）────────────
     logger.info("── P3 外部宏观因子 ──")
     external = compute_external_factors(snapshot)
+    degraded.extend(external.degraded)
 
     # ── 4. 桶强度 vs QQQ ─────────────────────────────────────
     bucket_ir, bucket_scores = compute_all_bucket_ir(buckets, prices, lookback=60)
@@ -125,6 +136,9 @@ def compute_macro_signal(
     )
     if external.anomalies:
         reasoning += f" | 宏观异动({len(external.anomalies)}项)!"
+    if degraded:
+        reasoning += f" | ⚠️数据降级({len(degraded)}项)"
+        logger.warning(f"[Macro] 数据降级: {', '.join(degraded)}")
     logger.info(f"[Macro] {reasoning}")
     for alert in external.anomalies:
         logger.warning(f"[Macro] {alert}")
@@ -142,6 +156,7 @@ def compute_macro_signal(
         bucket_ir      = bucket_ir,
         bucket_scores  = bucket_scores,
         external       = external,
+        degraded       = degraded,
         score          = round(score, 4),
         reasoning      = reasoning,
     )

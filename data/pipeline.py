@@ -66,14 +66,26 @@ class DataPipeline:
         """获取全部 FRED 宏观序列。"""
         return self.fred.get_all()
 
-    def get_macro_snapshot(self) -> dict[str, float]:
-        """返回各序列最新值的快照字典，便于信号层使用。"""
-        result = {}
+    def get_macro_snapshot(self) -> tuple[dict[str, float], list[str]]:
+        """
+        返回 (各序列最新值快照, 降级项列表)（R3.2）。
+        降级项：序列缺失 → FRED_MISSING:<sid>；数据点过期 → FRED_STALE:<sid>(<n>d)。
+        """
+        result: dict[str, float] = {}
+        degraded: list[str] = []
         for sid in FRED_SERIES:
-            val = self.fred.get_latest(sid)
-            if val is not None:
-                result[sid] = val
-        return result
+            dated = self.fred.get_latest_dated(sid)
+            if dated is None:
+                degraded.append(f"FRED_MISSING:{sid}")
+                continue
+            val, data_date = dated
+            result[sid] = val
+            stale = self.fred.staleness(sid, data_date)
+            if stale:
+                degraded.append(stale)
+        if degraded:
+            logger.warning(f"[Pipeline] 宏观数据降级 {len(degraded)} 项: {', '.join(degraded)}")
+        return result, degraded
 
     # ── 财报 ──────────────────────────────────────────────
 
@@ -120,10 +132,11 @@ class DataPipeline:
 
         logger.info("  宏观数据 (FRED)…")
         macro    = self.get_macro()
-        snapshot = self.get_macro_snapshot()
+        snapshot, macro_degraded = self.get_macro_snapshot()
 
         logger.info("  基本面数据 (yfinance info)…")
         fundamentals = self.get_fundamentals(pool)
 
         logger.info(f"── 数据层完成：{len(prices)} 只价格 / {len(macro)} 个宏观序列 / {len(fundamentals)} 只基本面 ──")
-        return {"prices": prices, "news": news, "macro": macro, "snapshot": snapshot, "fundamentals": fundamentals}
+        return {"prices": prices, "news": news, "macro": macro, "snapshot": snapshot,
+                "macro_degraded": macro_degraded, "fundamentals": fundamentals}

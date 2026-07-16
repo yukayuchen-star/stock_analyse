@@ -189,6 +189,20 @@ def _daily_summary(
     lines: List[str] = [
         f"# 每日量化分析报告 — {date_str}",
         "",
+    ]
+
+    # 数据降级区块（R3.2）：仅降级日出现，正常日无此区块
+    degraded = getattr(macro, "degraded", None) or []
+    if degraded:
+        lines += [
+            f"> ⚠️ **宏观数据降级（{len(degraded)} 项）**：以下数据缺失/过期，"
+            f"相关因子已剔除或按保守默认处理，评级可信度下降：  ",
+        ]
+        for d in degraded:
+            lines.append(f"> - `{d}`")
+        lines.append("")
+
+    lines += [
         "## 宏观环境",
         "",
         f"| 指标 | 值 | 信号 |",

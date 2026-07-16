@@ -523,7 +523,8 @@ def run(non_interactive: bool = False,
 
     # ── P3 宏观 ──────────────────────────────────────────
     logger.info("── P3 宏观信号层 ──")
-    macro = compute_macro_signal(snapshot, prices, buckets)
+    macro = compute_macro_signal(snapshot, prices, buckets,
+                                 degraded=data.get("macro_degraded", []))
     logger.info(
         f"  VIX={macro.vix_level:.1f} [{macro.vix_regime}] "
         f"仓位上限={macro.position_limit:.0%}  "

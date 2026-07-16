@@ -79,6 +79,9 @@ class ExternalFactorsResult:
     anomalies:     List[str] = field(default_factory=list)   # 人类可读预警
     anomaly_score: float = 0.0   # 加总异动严重程度（-1~0：均为偏空压力）
 
+    # 数据降级项（R3.2）：不可用的因子（已从综合均值中剔除，非中性伪装）
+    degraded: List[str] = field(default_factory=list)
+
     # 综合外部因子得分（-1~1）
     composite_score: float = 0.0
 
@@ -305,6 +308,17 @@ def compute_external_factors(snapshot: Dict[str, float]) -> ExternalFactorsResul
              (dollar_sig, dxy_ok), (infl_sig, infl_ok)]
     avail = [s for s, ok in pairs if ok]
     composite = float(np.mean(avail)) if avail else 0.0
+
+    # 数据降级项（R3.2）：显式记录不可用因子，供报告头部展示
+    degraded: List[str] = []
+    if not oil_ok:
+        degraded.append("OIL_UNAVAILABLE(油价因子剔除)")
+    if not hike_ok:
+        degraded.append("HIKE_GAP_MISSING(FEDFUNDS/DGS2缺失,加息预期剔除)")
+    if not dxy_ok:
+        degraded.append("DXY_UNAVAILABLE(美元因子剔除)")
+    if not infl_ok:
+        degraded.append("T10YIE_MISSING(通胀预期剔除)")
     # 并入异动惩罚后再钳制（此前 anomaly_score 计算出来却从未影响最终得分）
     composite = float(np.clip(composite + anomaly_score, -1.0, 1.0))
 
@@ -337,6 +351,7 @@ def compute_external_factors(snapshot: Dict[str, float]) -> ExternalFactorsResul
         inflation_signal = round(infl_sig, 4),
         anomalies      = anomalies,
         anomaly_score  = round(anomaly_score, 4),
+        degraded       = degraded,
         composite_score= round(composite,  4),
         reasoning      = reasoning,
     )
