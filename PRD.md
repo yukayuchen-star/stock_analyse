@@ -282,6 +282,18 @@ flowchart TD
 
 ### R3 — 数据可靠性（对应缺陷 #6-#10）
 
+> **✅ R3 实施状态（2026-07-16）**：R3.1–R3.3 已实施并通过验收（21 项 mock 单测 + 端到端）。
+> - **R3.1**：`with_retry` 薄封装（`data/base.py`，≤2 次重试 + 1s/2s 指数退避，穷尽原样抛出）
+>   套在 `yf.download` 与 FRED `get_series`；油/美元改走 `YFinanceSource`+SQLiteCache
+>   （断供第二跑命中缓存输出一致）。顺带对齐无前视口径：旧 `period="2y"` 混入今日盘中
+>   未完成 bar，改 `end=today`（排他）→ 最后一根为 t-1 已完成K线，同日重跑可复现。
+> - **R3.2**：`FREDSource.get_latest_dated` + `staleness`（日频 5 日历日≈2 交易日、月频 45 天）；
+>   `pipeline.get_macro_snapshot` 返回 `(snapshot, degraded)`；`MacroSignalResult.degraded` 聚合
+>   FRED_MISSING/FRED_STALE/VIX_MISSING/YIELD_MISSING/外部因子不可用；`QuantSignalResult.factor_ok`
+>   五子因子布尔（异常≠中性，info 空时 fund 亦标记）；`daily_summary.md` 头部降级区块（正常日无）。
+> - **R3.3**：`get_universe` marketCap 失败率 >20% → 告警 + 复用最近历史缓存且不写今日缓存
+>   （下次可重试）；无缓存可回退时按部分数据继续并告警。
+
 **R3.1 油/美元入缓存 + 统一重试**
 - 需求：`external_factors._fetch_price_series` 改走 `YFinanceSource.get_price`（享受 SQLiteCache）；
   `yfinance_source`/`fred_source` 增加统一「重试 ≤2 次 + 指数退避」薄封装（不引重依赖）。
