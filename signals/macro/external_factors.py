@@ -72,7 +72,7 @@ class ExternalFactorsResult:
 
     # 通胀预期（10Y 盈亏平衡利率）
     breakeven_10y:   float = 0.0
-    breakeven_trend: float = 0.0   # 相对长期目标(2.5%)的偏离（pp，正=高于目标）；非真实20d趋势
+    breakeven_deviation: float = 0.0   # 相对长期目标(2.5%)的偏离（pp，正=高于目标）；非趋势（R4.4 改名自 breakeven_trend）
     inflation_signal: float = 0.0  # -1~1，通胀预期↑→负
 
     # 异动检测
@@ -347,7 +347,7 @@ def compute_external_factors(snapshot: Dict[str, float]) -> ExternalFactorsResul
         dxy_ret_20d    = round(dxy_ret,    4),
         dollar_signal  = round(dollar_sig, 4),
         breakeven_10y  = round(be10y,      4),
-        breakeven_trend= round(be_trend,   4),
+        breakeven_deviation = round(be_trend, 4),
         inflation_signal = round(infl_sig, 4),
         anomalies      = anomalies,
         anomaly_score  = round(anomaly_score, 4),

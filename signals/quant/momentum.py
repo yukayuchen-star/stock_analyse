@@ -14,6 +14,13 @@ def _macd(close: pd.Series, fast: int = 12, slow: int = 26, sig: int = 9) -> pd.
 
 
 def _rsi(close: pd.Series, period: int = 14) -> float:
+    """Cutler 口径 RSI（rolling mean），非 Wilder（ewm α=1/14）。
+
+    R4.3 决策记录（2026-07-17，128 只缓存池实测）：两口径 RSI 值 mean|Δ|=6.1点/
+    max 17点（Wilder 把极值拉向 50），但经 24%动量×30%量化×10%总分 三层衰减后
+    |Δfinal|≤0.0035、80/20 特判带翻转 0 只——决策层差异不显著。切换需重跑 ML
+    回测重建全部基线（现基线均为本口径），成本收益不成立 → 保留 Cutler，勿改。
+    """
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = (-delta.clip(upper=0)).rolling(period).mean()

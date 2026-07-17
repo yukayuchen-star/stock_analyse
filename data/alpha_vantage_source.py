@@ -1,3 +1,9 @@
+"""Alpha Vantage 财报数据源。
+
+保留原因（R4.4 注记）：实盘主流程（main.py 每日选股）不调用本源——基本面走
+yfinance info 快照；本源经 pipeline.get_earnings 提供**季度财报时间序列**，是未来
+实现「财报+2月延迟」PIT 回测基本面的唯一入口，删除即断路，故保留不删。
+"""
 import pandas as pd
 from loguru import logger
 
