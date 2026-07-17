@@ -40,6 +40,13 @@ class StockDecision:
     quant_signal: Optional[QuantSignalResult] = None
     macro_signal: Optional[MacroSignalResult] = None
 
+    # 实际生效的三引擎权重（R4.1，ScorerOutput 透传）：
+    # 标准 0.55/0.35/0.10；缠强量弱背离票 0.70/0.20/0.10——报告按此渲染，不再硬编码
+    chan_weight:        float = 0.55
+    macro_weight:       float = 0.35
+    quant_weight:       float = 0.10
+    divergence_applied: bool  = False
+
     # 辅助信息
     risk_flags:      List[str] = field(default_factory=list)
     score_reasoning: str       = ""
@@ -86,6 +93,10 @@ def make_decision(
         chan_signal=chan,
         quant_signal=quant,
         macro_signal=macro,
+        chan_weight=scored.chan_weight,
+        macro_weight=scored.macro_weight,
+        quant_weight=scored.quant_weight,
+        divergence_applied=scored.divergence_applied,
         risk_flags=risk.risk_flags,
         score_reasoning=scored.reasoning,
     )

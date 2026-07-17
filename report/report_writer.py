@@ -91,10 +91,18 @@ def _stock_report(d: StockDecision, date_str: str) -> str:
         "",
     ]
 
+    # R4.1：权重从 StockDecision 动态取（背离票 70/20/10，不再硬编码 55/35/10）
+    if d.divergence_applied:
+        lines += [
+            f"> ⚠️ **背离加权生效**：缠论强(≥0.45)×量化弱(≤-0.10)，结构优先 → "
+            f"缠论 {d.chan_weight:.0%} / 宏观 {d.macro_weight:.0%} / 量化 {d.quant_weight:.0%}",
+            "",
+        ]
+
     # 缠论模块
     if chan:
         lines += [
-            "## 缠论分析（权重 55%）",
+            f"## 缠论分析（权重 {d.chan_weight:.0%}）",
             "",
             f"| 项目 | 值 |",
             f"|------|----|",
@@ -115,7 +123,7 @@ def _stock_report(d: StockDecision, date_str: str) -> str:
     # 量化模块
     if quant:
         lines += [
-            "## 量化分析（权重 10%）",
+            f"## 量化分析（权重 {d.quant_weight:.0%}）",
             "",
             f"| 因子 | 权重 | 得分 |",
             f"|------|------|------|",
@@ -133,7 +141,7 @@ def _stock_report(d: StockDecision, date_str: str) -> str:
     # 宏观模块
     ext = macro.external if macro else None
     lines += [
-        "## 宏观背景（权重 35%）",
+        f"## 宏观背景（权重 {d.macro_weight:.0%}）",
         "",
         f"| 项目 | 值 |",
         f"|------|----|",
