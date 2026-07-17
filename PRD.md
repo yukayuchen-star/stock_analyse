@@ -312,6 +312,22 @@ flowchart TD
 
 ### R4 — 校准与观测（对应缺陷 #11-#16）
 
+> **✅ R4 实施状态（2026-07-17，R4.2 已于 07-14 先行落地）**：
+> - **R4.1 已实施**：`StockDecision` 新增 `chan/macro/quant_weight` + `divergence_applied`
+>   （ScorerOutput 透传），三处报告标题动态渲染；背离票额外显示「⚠️ 背离加权生效」提示条。
+>   验收：构造背离票渲染 70%/20%/10% + 提示条，普通票 55%/35%/10% 无提示条 ✓。
+> - **R4.3 对比完成，决策=不切换**：128 只缓存池实测，Cutler vs Wilder RSI 值差
+>   mean|Δ|=6.1点/max 17点（Wilder 拉极值向 50），但经 24%×30%×10% 三层衰减后
+>   **|Δfinal|≤0.0035、80/20 特判带翻转 0 只**——决策层差异不显著；切换需重跑 ML 回测
+>   重建全部基线，成本收益不成立。决策记录入 `momentum.py._rsi` docstring 与 CLAUDE.md。
+> - **R4.4 已实施**：CLAUDE.md「桶内 Z-score」→「百分位 rank」+ RSI Cutler 口径注记 +
+>   基本面快照禁入回测（开发四原则#4）+ 周线单边过滤注记（缠论精髓节）；
+>   `breakeven_trend` 改名 `breakeven_deviation`（仅定义文件内两处引用，无外部依赖）；
+>   `alpha_vantage_source.py` 加保留注记（PIT 回测基本面唯一入口，删除即断路）。
+> - **R4.5 缓议（记录在案）**：异动双向化需先证明「利多异动加分」提升宏观分辨力，
+>   当前无宏观标注回测框架可验证；单边看空 cap −0.3 是保守偏置（宁可少赚不多亏），
+>   在证据出现前维持现状。若未来搭建宏观事件回测（异动日 vs 前向 QQQ 收益），再评估。
+
 **R4.1 报告权重动态化**：`report_writer` 从 `ScorerOutput.chan_weight/macro_weight/quant_weight` 取实际权重渲染标题；背离票额外显示「背离加权 70/20/10」。验收：构造背离票，报告标题显示 70%/20%/10%。涉及：`report/report_writer.py:96,118,134`、`decision/strategy.py`（透传 ScorerOutput）。
 
 **R4.2 评级标尺重标定**：基于近 60 个交易日 final_score 分布（`output/*/` 已留存）重设阈值（如 Buy≥0.50）或将档位更名为语义中性（Strong/Positive/Neutral/...）；同时评估 12b——VIX tense 下非「b1+共振2」是否应从「×0.5」升级为一票否决以对齐门控表。验收：重放近 30 日历史决策，输出新旧评级迁移矩阵供人工确认后启用。涉及：`decision/rating.py`、`decision/risk_overlay.py:57-64`。
