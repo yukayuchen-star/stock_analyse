@@ -45,6 +45,102 @@ def _kama(close: pd.Series, period: int = 10, fast: int = 2, slow: int = 30) -> 
     return pd.Series(kama, index=close.index)
 
 
+# ── Pullback / Breakout special 信号（R5 量价确认）────────────
+
+def _special_signal(
+    df: pd.DataFrame,
+    *,
+    pullback_gate: bool = False,
+    breakout_gate: bool = True,
+    pullback_thr: float = 0.7,
+    breakout_thr: float = 1.5,
+) -> tuple[float, dict]:
+    """回调/突破 special 信号，含 R5 量价确认门。
+
+    价格触发（与 R5 前一致）：
+      Pullback  上升趋势(c>SMA200) 且 EMA20 偏离 ∈[-3%,+1%] → 原始 +0.30
+      Breakout  价格在 52 周高点 3% 以内(-3%~0%)          → 原始 +0.20
+
+    R5 量价确认门（每信号独立开关；无量能数据时自动回退该信号为纯价格）：
+      breakout_gate（默认 ON，thr=1.5）— 因子级回测实证（127 只/27.9k 事件）：
+        无量近高假突破前向显著更差 → breakout_vol_ratio=Volume[-1]/VMA20：
+        ≥thr 放量真突破→满额 +0.20；[1.0,thr) 半额 +0.10；<1.0 无量近高→ +0.05；
+        弱收盘(close_pos<0.5)将满额突破降一档。KEEP win .611/exp +.0385 ≫ DEMOTE .570/+.0165。
+      pullback_gate（默认 OFF）— A股「缩量回调=健康」经美股回测**证伪且方向相反**：
+        缩量 KEEP exp +.0041 < 放量 DEMOTE +.0170（Δ=-.0130）→ 不加门，pullback 维持纯价格。
+        反向门（奖励放量回调）疑似有效但属同段样本内过拟合，待 OOS 验证再议（R5.3 记录）。
+
+    仅用 ≤末行数据，无前视；可安全用于 as-of 逐日重放。
+    两门皆 OFF（或无量能数据）→ 精确回退 R5 前的纯价格行为。
+    """
+    close = df["Close"].dropna()
+    aux: dict = {
+        "special_signal":     0.0,
+        "pullback_vol_ratio": None,
+        "breakout_vol_ratio": None,
+        "close_pos":          None,
+    }
+    if len(close) < 200:
+        return 0.0, aux
+
+    c       = float(close.iloc[-1])
+    ema20_v = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+    ema_dev = (c - ema20_v) / ema20_v if ema20_v > 0 else 0.0
+
+    # ── 量能比率（仅 ≤当日数据；诊断值恒计算，是否 gate 由各信号开关决定）──
+    pb_ratio = bo_ratio = None
+    if "Volume" in df.columns:
+        volume = df["Volume"].reindex(close.index).astype(float)
+        if len(volume) >= 20:
+            vma20 = float(volume.rolling(20).mean().iloc[-1])
+            if np.isfinite(vma20) and vma20 > 0:
+                pb_ratio = float(volume.tail(3).mean()) / vma20
+                bo_ratio = float(volume.iloc[-1]) / vma20
+                aux["pullback_vol_ratio"] = pb_ratio
+                aux["breakout_vol_ratio"] = bo_ratio
+
+    candidates: list[float] = []
+
+    # ── Pullback 触发（默认纯价格；gate 已证伪）─────────────
+    sma200_v = float(close.rolling(200).mean().iloc[-1])
+    if c > sma200_v and -0.03 <= ema_dev <= 0.01:
+        if not (pullback_gate and pb_ratio is not None):
+            candidates.append(0.30)
+        elif pb_ratio < pullback_thr:
+            candidates.append(0.30)
+        elif pb_ratio < 1.0:
+            candidates.append(0.15)
+        else:
+            candidates.append(-0.05)
+
+    # ── Breakout 触发（默认量能门 ON，thr=1.5）─────────────
+    if len(close) >= 252:
+        h52 = float(close.rolling(252).max().iloc[-1])
+        if h52 > 0 and -0.03 <= (c - h52) / h52 <= 0.00:
+            if not (breakout_gate and bo_ratio is not None):
+                candidates.append(0.20)
+            else:
+                if bo_ratio >= breakout_thr:
+                    bo = 0.20                # 放量=真突破
+                elif bo_ratio >= 1.0:
+                    bo = 0.10
+                else:
+                    bo = 0.05                # 无量近高=假突破预警
+                # 弱收盘将满额突破降一档
+                if "High" in df.columns and "Low" in df.columns:
+                    hi = float(df["High"].reindex(close.index).iloc[-1])
+                    lo = float(df["Low"].reindex(close.index).iloc[-1])
+                    cpos = (c - lo) / (hi - lo) if hi > lo else 0.5
+                    aux["close_pos"] = cpos
+                    if bo == 0.20 and cpos < 0.5:
+                        bo = 0.10
+                candidates.append(bo)
+
+    special = max(candidates) if candidates else 0.0
+    aux["special_signal"] = special
+    return special, aux
+
+
 # ── 主函数 ────────────────────────────────────────────────────
 
 def compute_momentum_score(df: pd.DataFrame) -> tuple[float, dict]:
@@ -57,9 +153,9 @@ def compute_momentum_score(df: pd.DataFrame) -> tuple[float, dict]:
       RSI14   24%  — 偏离 50 线，±70/30 区间调整
       KAMA    20%  — 5 日 KAMA 斜率
 
-    Pullback/Breakout 附加信号（缠论二买/三买前置识别）：
-      回调买入 +0.3  — 上升趋势中价格触及 EMA20 附近（±3%）
-      突破信号 +0.2  — 价格接近 52 周高点 3% 以内
+    Pullback/Breakout 附加信号（缠论二买/三买前置识别，R5 加量价确认门）：
+      回调买入 +0.3  — 上升趋势中价格触及 EMA20 附近；缩量确认健康、放量降权
+      突破信号 +0.2  — 价格接近 52 周高点 3% 以内；放量+强收盘确认、无量降权
     """
     close = df["Close"].dropna()
     if len(close) < 30:
@@ -101,24 +197,10 @@ def compute_momentum_score(df: pd.DataFrame) -> tuple[float, dict]:
       + 0.20 * kama_score
     )
 
-    # ── Pullback / Breakout 信号 ─────────────────────────
-    special = 0.0
-    ema20   = close.ewm(span=20, adjust=False).mean()
-    ema20_v = float(ema20.iloc[-1])
+    # ── Pullback / Breakout 信号（R5 量价确认门）─────────
+    ema20_v = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
     ema_dev = (c - ema20_v) / ema20_v if ema20_v > 0 else 0.0
-
-    if len(close) >= 200:
-        sma200_v = float(close.rolling(200).mean().iloc[-1])
-        in_uptrend = c > sma200_v
-        # 回调买入：价格在 EMA20 附近（-3% ~ +1%），处于上升趋势
-        if in_uptrend and -0.03 <= ema_dev <= 0.01:
-            special = 0.30
-
-    # 突破信号：价格在 52W 高点 3% 以内
-    if len(close) >= 252:
-        h52 = float(close.rolling(252).max().iloc[-1])
-        if h52 > 0 and -0.03 <= (c - h52) / h52 <= 0.00:
-            special = max(special, 0.20)
+    special, special_aux = _special_signal(df)  # 默认：breakout 量能门 ON、pullback 纯价格
 
     # 附加信号以非线性方式叠加，避免突破 ±1
     final = base + special * (1.0 - abs(base))
@@ -129,7 +211,7 @@ def compute_momentum_score(df: pd.DataFrame) -> tuple[float, dict]:
         "rsi14":         rsi_v,
         "kama_slope5d":  kama_slope,
         "ema20_dev":     ema_dev,
-        "special_signal": special,
+        **special_aux,
     }
 
     return float(np.clip(final, -1, 1)), indicators
