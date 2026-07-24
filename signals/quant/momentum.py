@@ -80,6 +80,8 @@ def _special_signal(
         "pullback_vol_ratio": None,
         "breakout_vol_ratio": None,
         "close_pos":          None,
+        "pullback_trig":      False,   # 价格触发标记（供 OOS 因子日志读取，免重算触发条件）
+        "breakout_trig":      False,
     }
     if len(close) < 200:
         return 0.0, aux
@@ -109,6 +111,7 @@ def _special_signal(
     # ── Pullback 触发（默认纯价格；gate 已证伪）─────────────
     sma200_v = float(close.rolling(200).mean().iloc[-1])
     if c > sma200_v and -0.03 <= ema_dev <= 0.01:
+        aux["pullback_trig"] = True
         if not (pullback_gate and pb_ratio is not None):
             candidates.append(0.30)
         elif pb_ratio < pullback_thr:
@@ -122,6 +125,7 @@ def _special_signal(
     if len(close) >= 252:
         h52 = float(close.rolling(252).max().iloc[-1])
         if h52 > 0 and -0.03 <= (c - h52) / h52 <= 0.00:
+            aux["breakout_trig"] = True
             if not (breakout_gate and bo_ratio is not None):
                 candidates.append(0.20)
             else:

@@ -35,6 +35,11 @@ from backtest.report             import write_backtest_report
 from backtest.forward_tracker    import (
     log_signals, evaluate_pending, write_forward_report,
 )
+from backtest.factor_forward     import (
+    log_breakout_events,
+    evaluate_pending      as evaluate_factor_pending,
+    write_factor_forward_report,
+)
 from utils.time_utils   import today_str, prev_trading_day, is_trading_day
 from utils.housekeeping import cleanup_old_files
 
@@ -428,6 +433,8 @@ def run(non_interactive: bool = False,
     n_eval = evaluate_pending(pipeline)
     if not n_eval:
         logger.info("  [ForwardTracker] 暂无到期待评估信号")
+    # R5 breakout 门 OOS：评估满 20TD 的因子事件
+    evaluate_factor_pending(pipeline)
 
     logger.info("── universe 扫描（add 候选）──")
     # universe 仅服务 add 候选筛选，失败不应终止每日主流程（R2 调度健壮性）
@@ -576,6 +583,9 @@ def run(non_interactive: bool = False,
 
     # ── 前向验证：记录今日买入信号 ───────────────────────────
     log_signals(decisions=decisions, buckets=buckets, date_str=date_str, prices=prices)
+    # R5 breakout 门 OOS：记录当日池内每个 breakout special 触发（不限评级；
+    # 限定 final_pool 以剔除 benchmark ETF 污染）
+    log_breakout_events(prices=prices, date_str=date_str, tickers=set(final_pool))
 
     # ── P6 报告 ──────────────────────────────────────────
     logger.info("── P6 报告层 ──")
@@ -615,6 +625,7 @@ def run(non_interactive: bool = False,
     logger.info("── P8 前向信号验证报告 ──")
     fv_path = write_forward_report(date_str, output_dir)
     logger.info(f"  前向验证报告: {fv_path}")
+    write_factor_forward_report(date_str, output_dir)
 
     # ── 落盘：池快照 + 变更日志 ──────────────────────────
     save_pool_snapshot(
