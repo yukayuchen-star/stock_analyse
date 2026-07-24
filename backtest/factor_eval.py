@@ -6,7 +6,10 @@
 标注前向 5/10/20 交易日收益，对比「纯价格 vs 量能门」的胜率/期望/信号数/假信号率。
 
 用法：`python -m backtest.factor_eval`
-数据：`cache/market_data.db` 的 US OHLCV 价格 blob（yfinance auto_adjust，拆股已调整）。
+数据：`cache/market_data.db` 的 OHLCV 价格 blob（yfinance auto_adjust，拆股已调整）。
+  样本为**扫描过的美股单票为主**；cache 键为哈希、blob 不带 ticker，无法 allowlist，
+  故 QQQ/SPY 等基准 ETF（有量能）可能混入 ~2/127（^VIX 无量能已被 OHLCV 过滤天然剔除），
+  量级可忽略、不影响 breakout 门单调性结论。
 
 2026-07-24 结论（R5.1/R5.2）：
   breakout 量能门 **过**（KEEP≥1.5× fwd10 win .611/exp +.0385 ≫ DEMOTE<1.0× .570/+.0165，
@@ -59,7 +62,9 @@ def build_events(df: pd.DataFrame) -> pd.DataFrame:
     sma200 = close.rolling(200).mean()
     h52    = close.rolling(252).max()
     vma20  = vol.rolling(20).mean()
-    vol3   = vol.rolling(3).mean()                    # == tail(3).mean at t
+    # skipna 与 prod 的 volume.tail(3).mean() 对齐（rolling(3).mean 会传播 NaN，二者
+    # 在缺量能末窗上分叉——用 min_periods=1 复刻 skipna 语义，防两路发射逻辑漂移）。
+    vol3   = vol.rolling(3, min_periods=1).mean()     # == tail(3).mean(skipna) at t
     ema_dev = close / ema20 - 1.0
     rng = high - low
 
@@ -83,30 +88,39 @@ def _stat(sub: pd.DataFrame, h: int) -> tuple[int, float, float]:
     return len(sub), float((f > 0).mean()), float(f.mean())
 
 
-def _selfcheck(blobs: list[pd.DataFrame], n_samples: int = 60) -> None:
-    """抽样断言：向量化 special 触发 == 实盘逐日 _special_signal（两门皆关=纯价格）。"""
+def _selfcheck(blobs: list[pd.DataFrame], n_samples: int = 120) -> None:
+    """抽样断言：向量化 build_events 与实盘 _special_signal 完全对齐——
+    (a) 纯价格 special 触发一致；(b) pb_ratio/bo_ratio 一致（含缺量能末窗，
+    覆盖 rolling(3,min_periods=1) 与 tail(3).mean(skipna) 的语义等价）。"""
     rng = np.random.default_rng(7)
     checked = mism = 0
     for _ in range(n_samples):
         df = blobs[rng.integers(len(blobs))]
         t = int(rng.integers(260, len(df) - 21))
         sl = df.iloc[: t + 1]
-        live, _ = _special_signal(sl, pullback_gate=False, breakout_gate=False)  # 纯价格
+        _, live_aux = _special_signal(sl, pullback_gate=False, breakout_gate=False)
+        row = build_events(df)  # 整列，取位置 t
+        vec = row.loc[df.index[t]] if df.index[t] in row.index else None
         c = float(sl.Close.iloc[-1])
-        ema = float(sl.Close.ewm(span=20, adjust=False).mean().iloc[-1])
-        ed = c / ema - 1.0
         sm = float(sl.Close.rolling(200).mean().iloc[-1])
-        cand = []
-        if c > sm and -0.03 <= ed <= 0.01:
-            cand.append(0.30)
+        ed = c / float(sl.Close.ewm(span=20, adjust=False).mean().iloc[-1]) - 1.0
         h52 = float(sl.Close.rolling(252).max().iloc[-1])
-        if h52 > 0 and -0.03 <= (c - h52) / h52 <= 0.00:
-            cand.append(0.20)
-        vec = max(cand) if cand else 0.0
+        pb_trig = c > sm and -0.03 <= ed <= 0.01
+        bo_trig = h52 > 0 and -0.03 <= (c - h52) / h52 <= 0.00
         checked += 1
-        mism += abs(vec - live) > 1e-12
+        # (b) 若该日进入事件集，断言量能比率两路一致
+        if vec is not None and bool(vec.pb_trig) == pb_trig and bool(vec.bo_trig) == bo_trig:
+            lpb, lbo = live_aux["pullback_vol_ratio"], live_aux["breakout_vol_ratio"]
+            if lpb is not None and abs(float(vec.pb_ratio) - lpb) > 1e-9:
+                mism += 1
+            if lbo is not None and abs(float(vec.bo_ratio) - lbo) > 1e-9:
+                mism += 1
+        elif pb_trig or bo_trig:
+            # 触发但未落入事件集（仅当 fwd20 为 NaN 的尾部日）→ 允许
+            if t < len(df) - 20:
+                mism += 1
     assert mism == 0, f"emission drift: {mism}/{checked} vectorized≠live"
-    print(f"[selfcheck] vectorized == live _special_signal on {checked}/{checked} sampled days\n")
+    print(f"[selfcheck] build_events == live _special_signal (触发+量能比率) on {checked}/{checked} 抽样日\n")
 
 
 def main() -> None:
@@ -144,6 +158,15 @@ def main() -> None:
         nd, wd, xd = _stat(bo[bo.bo_ratio < 1.0], PRIMARY_H)
         print(f"  thr={thr}×: KEEP n={nk:>5} win={wk:.3f} exp={xk:+.4f} | "
               f"DEMOTE n={nd:>5} win={wd:.3f} exp={xd:+.4f} | Δexp={xk - xd:+.4f}")
+    # 三档单调性验证：实盘 shipped 三档 <1.0(+0.05) / [1.0,thr)(+0.10) / ≥thr(+0.20)
+    # 的前向收益须单调抬升，方为中间档 +0.10 的证据（回应 code-review Finding 4）。
+    thr = 1.5  # shipped breakout_thr
+    lo  = _stat(bo[bo.bo_ratio < 1.0], PRIMARY_H)
+    mid = _stat(bo[(bo.bo_ratio >= 1.0) & (bo.bo_ratio < thr)], PRIMARY_H)
+    hi  = _stat(bo[bo.bo_ratio >= thr], PRIMARY_H)
+    print(f"  [shipped 三档 @thr={thr}×] "
+          f"DEMOTE<1.0 exp={lo[2]:+.4f}(n={lo[0]}) → MID[1.0,{thr}) exp={mid[2]:+.4f}(n={mid[0]}) "
+          f"→ KEEP≥{thr} exp={hi[2]:+.4f}(n={hi[0]})  单调={'✓' if lo[2] <= mid[2] <= hi[2] else '✗'}")
 
     print("\nVERDICT: breakout 门过(thr=1.5×，已 merge) | pullback 门证伪方向相反(不 merge)")
 

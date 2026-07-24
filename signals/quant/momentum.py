@@ -64,8 +64,9 @@ def _special_signal(
     R5 量价确认门（每信号独立开关；无量能数据时自动回退该信号为纯价格）：
       breakout_gate（默认 ON，thr=1.5）— 因子级回测实证（127 只/27.9k 事件）：
         无量近高假突破前向显著更差 → breakout_vol_ratio=Volume[-1]/VMA20：
-        ≥thr 放量真突破→满额 +0.20；[1.0,thr) 半额 +0.10；<1.0 无量近高→ +0.05；
-        弱收盘(close_pos<0.5)将满额突破降一档。KEEP win .611/exp +.0385 ≫ DEMOTE .570/+.0165。
+        ≥thr 放量真突破→满额 +0.20；[1.0,thr) 温和放量→ +0.10；<1.0 无量近高→ +0.05
+        （三档由回测证实的 bo_ratio 单调性支撑）。KEEP win .611/exp +.0385 ≫ DEMOTE .570/+.0165。
+        close_pos 仅诊断暴露，回测实测中性不参与打分。末窗量能缺失(NaN)→该信号回退纯价格。
       pullback_gate（默认 OFF）— A股「缩量回调=健康」经美股回测**证伪且方向相反**：
         缩量 KEEP exp +.0041 < 放量 DEMOTE +.0170（Δ=-.0130）→ 不加门，pullback 维持纯价格。
         反向门（奖励放量回调）疑似有效但属同段样本内过拟合，待 OOS 验证再议（R5.3 记录）。
@@ -94,10 +95,14 @@ def _special_signal(
         if len(volume) >= 20:
             vma20 = float(volume.rolling(20).mean().iloc[-1])
             if np.isfinite(vma20) and vma20 > 0:
-                pb_ratio = float(volume.tail(3).mean()) / vma20
-                bo_ratio = float(volume.iloc[-1]) / vma20
-                aux["pullback_vol_ratio"] = pb_ratio
-                aux["breakout_vol_ratio"] = bo_ratio
+                # 末窗量能可能缺失(NaN)——须过滤，否则 NaN 比较恒 False 会把
+                # 真突破误降为 +0.05，而非 docstring 承诺的"无量能数据→纯价格回退"。
+                pb_raw = float(volume.tail(3).mean()) / vma20
+                bo_raw = float(volume.iloc[-1]) / vma20
+                if np.isfinite(pb_raw):
+                    pb_ratio = aux["pullback_vol_ratio"] = pb_raw
+                if np.isfinite(bo_raw):
+                    bo_ratio = aux["breakout_vol_ratio"] = bo_raw
 
     candidates: list[float] = []
 
@@ -120,21 +125,20 @@ def _special_signal(
             if not (breakout_gate and bo_ratio is not None):
                 candidates.append(0.20)
             else:
+                # 三档由 bo_ratio 单调映射，回测已证前向收益随 bo_ratio 单调
+                # （DEMOTE<1.0 / MID[1.0,thr) / KEEP≥thr 逐级抬升）。
                 if bo_ratio >= breakout_thr:
                     bo = 0.20                # 放量=真突破
                 elif bo_ratio >= 1.0:
-                    bo = 0.10
+                    bo = 0.10                # 温和放量=中性
                 else:
                     bo = 0.05                # 无量近高=假突破预警
-                # 弱收盘将满额突破降一档
+                candidates.append(bo)
+                # close_pos 仅作诊断暴露（弱收盘信息）——回测实测中性，不参与打分
                 if "High" in df.columns and "Low" in df.columns:
                     hi = float(df["High"].reindex(close.index).iloc[-1])
                     lo = float(df["Low"].reindex(close.index).iloc[-1])
-                    cpos = (c - lo) / (hi - lo) if hi > lo else 0.5
-                    aux["close_pos"] = cpos
-                    if bo == 0.20 and cpos < 0.5:
-                        bo = 0.10
-                candidates.append(bo)
+                    aux["close_pos"] = (c - lo) / (hi - lo) if hi > lo else 0.5
 
     special = max(candidates) if candidates else 0.0
     aux["special_signal"] = special

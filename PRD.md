@@ -419,10 +419,16 @@ flowchart TD
   放量 KEEP(≥1.5×) fwd10 win **.611**/exp **+.0385** ≫ 无量 DEMOTE(<1.0×) win .570/exp +.0165
   （Δexp(K−D)=**+.0220**）；且随阈值**单调**（1.5/2.0/2.5×→exp +.0385/+.0395/+.0414），
   是信号非噪声的判据。选 **1.5×**（分离度×样本量最优：KEEP n=1812≥100；2.0/2.5× 分离更大但
-  KEEP population 缩到 713/338，因子发火频率不足）。弱收盘(close_pos<0.5)降一档保留（理论正确、
-  实测中性≈无害）。价值=**过滤 9,034 个无量近高假突破**（该组 exp 显著更低）。
-  → `breakout_gate=True, breakout_thr=1.5`（momentum 默认）。
-- 涉及：`signals/quant/momentum.py`（`_special_signal` breakout 分支；indicators 暴露 `breakout_vol_ratio`/`close_pos`）。
+  KEEP population 缩到 713/338，因子发火频率不足）。价值=**过滤 9,000+ 无量近高假突破**
+  （该组 exp 显著更低）。→ `breakout_gate=True, breakout_thr=1.5`（momentum 默认）。
+  ⚠️ 具体小数随 cache 快照变动（如全量扫描刷新后 KEEP exp≈+.036、DEMOTE≈+.016），
+  **稳健的是分离度与单调性**，非某位小数。
+- **code-review 加固（2026-07-24）**：① 修正末窗量能缺失(NaN)误降 bug——bo_ratio 非有限时
+  回退纯价格 +0.20（原 NaN 比较恒 False 会误判为 +0.05）；② **移除弱收盘 close_pos 降档**
+  （未进回测 A/B 且实测中性，违背严格门纪律 → 删，close_pos 仅保留为诊断）；③ shipped **三档
+  单调性获证**：DEMOTE<1.0(+0.05) exp+.016 → MID[1.0,1.5)(+0.10) exp+.021 → KEEP≥1.5(+0.20)
+  exp+.036，单调 ✓（中间档 +0.10 由此有据，非拍脑袋）。
+- 涉及：`signals/quant/momentum.py`（`_special_signal` breakout 分支；`breakout_vol_ratio`/`close_pos` 诊断暴露）。
 
 #### R5.3 底部放量反转 + 反向 pullback 门（本期缓议，记录在案）
 
@@ -446,10 +452,14 @@ flowchart TD
   （单臂 ≥ ~100 信号）。未过门则如实记录、不 merge（允许只 merge 通过的那一个门）。
 - 实施路径：先 scratchpad 研究脚本产出 go/no-go 证据（写回本节验收记录）；过门后固化为
   `backtest/factor_eval.py` 供未来因子复用。
-- **✅ 落地（2026-07-24）**：数据源=`cache/market_data.db` 127 只 US OHLCV（2021-07~2026-07，
-  ~1253 日/只），向量化 as-of 滚动统计（位置 t 的 rolling 仅用 ≤t 数据，无前视），27,904 事件
-  （13,540 pullback / 15,404 breakout），前向 5/10/20 日收益。**breakout 门过、pullback 门证伪**
-  （见 R5.1/R5.2 结论）。已固化为 `backtest/factor_eval.py`（`python -m backtest.factor_eval` 复现）。
+- **✅ 落地（2026-07-24）**：数据源=`cache/market_data.db` ~127 个 OHLCV blob（2021-07~2026-07，
+  ~1253 日/只），向量化 as-of 滚动统计（位置 t 的 rolling 仅用 ≤t 数据，无前视），~2.8 万事件，
+  前向 5/10/20 日收益。**breakout 门过、pullback 门证伪**（见 R5.1/R5.2 结论）。已固化为
+  `backtest/factor_eval.py`（`python -m backtest.factor_eval` 复现）。
+- **code-review 加固（2026-07-24）**：① `_selfcheck` 由「仅纯价格触发」升级为**并断言 pb/bo 量能比率
+  两路一致**（120/120 抽样），覆盖 `rolling(3,min_periods=1)` ≡ `tail(3).mean(skipna)` 语义等价，
+  防向量化/逐日发射漂移；② 样本诚实：cache 键为哈希、blob 不带 ticker 无法 allowlist，QQQ/SPY 等
+  基准 ETF 可能混入 ~2/127（^VIX 无量能已被 OHLCV 过滤剔除），量级可忽略、不改单调性结论。
 - 涉及：`backtest/factor_eval.py`（新）、`signals/quant/momentum.py`。
 
 #### R5.5 诚实边界 Honest Bounds（反 overclaim，必读）
