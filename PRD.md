@@ -473,6 +473,23 @@ flowchart TD
 - 基本面一致性（growth_quality 的 rev/profit/cashflow 同向加分）想法有价值但**无 PIT 历史
   不可回测**（R4.4 既定原则：yfinance 快照禁入回测）——已被 Scope 决策排除，如实记录不做。
 
+#### R5.6 样本外(OOS)前向验证 breakout 门（2026-07-24 落地）
+
+- 背景：R5.2 的 breakout 门是 **in-sample**（127只/2021-2026）调参，有过拟合风险；in-sample
+  的 pullback 门证伪已警示照搬危险。真正确认需**样本外前向证据**——不能用同段历史 cache 回填
+  （=再污染），须从上线日向前逐日累积。
+- 机制：`backtest/factor_forward.py`（与 `forward_tracker` 平行、共库独立表）。每日在 `main.py`
+  记录 **final_pool 内每一个 breakout special 触发**（不限评级——breakout 是 10% 量化子信号极少
+  翻动最终评级，Buy 门下样本会饿死；剔除 benchmark ETF 防污染），标注 bo_ratio 与 KEEP/MID/
+  DEMOTE 桶；满 20 交易日后计前向 5/10/20 日收益；报告写 `output/{date}/r5_breakout_oos.md`。
+  发射逻辑复用实盘 `_special_signal`（新增 `breakout_trig`/`pullback_trig` aux 标记，免重算触发、
+  防重复漂移），与 in-sample as-of 同口径。
+- 判定：KEEP/DEMOTE 桶各 ≥30 才下结论——单调且 KEEP−DEMOTE>0 → **OOS 确认**；KEEP−DEMOTE≤0
+  → **OOS 背离**（提示复核过拟合）；否则"待累积"。**诚实**：门槛前不下任何结论，避免小样本噪声
+  当证据。首批约需 20 交易日成熟，统计意义的确认需数月积累（对齐三层稀释下"因子精确度"的定位）。
+- 涉及：`backtest/factor_forward.py`（新）、`main.py`（log/eval/report 三处挂载）、
+  `signals/quant/momentum.py`（`_special_signal` 暴露 trig 标记）。
+
 ### 5.1 优先级与依赖
 
 ```
