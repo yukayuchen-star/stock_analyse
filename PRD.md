@@ -563,7 +563,19 @@ as-of 发射逻辑，**过 R6.1 验证门后才进入实盘打分**；in-sample 
      接 `factor_engine._run`）。
 - 验收：R6.1 门下结构因子 IC 显著、分位单调、跨年稳定、与现有五因子低相关才 merge；无缠论结果 / 缺中枢时中性回退（0）；
   暴露字段不改动既有 US / A股 决策与回测逐票输出（回归对比 final_score 无非预期漂移）。
-- 涉及：`signals/chan/chan_signal.py`（只读暴露字段）、`signals/quant/structure.py`（新）、`signals/quant/factor_engine.py`（接入）。
+- **🔴 结论（2026-08-02 因子级 as-of 回测，R6.1 门）：6 特征全 REJECT，不 merge。**
+  6 特征（`chan_area_ratio` 背驰面积比 / `chan_pivot_width` 中枢震荡幅度 / `chan_pivot_age` 中枢新鲜度 /
+  `chan_price_pos` 带内位置 / `chan_dist_swhi/swlo` 到摆动高低点距离）经 `signals/quant/structure.py` 逐日
+  as-of 重放（复用 chan 公开构建器，**未改 chan_signal.py**）入 R6.1 门。**首门 29 只（偏科技）**：
+  `chan_dist_swlo` 近失（IC +.059/fwd10 win .61/**t +2.07**，仅栽严格单调 ρ .70）、`pivot_width`/`price_pos`
+  稳定正 IC。**按用户决策扩宇宙到 78 只跨行业再门**（本应收窄 CI 抬 t）——实测反而**削弱**：`chan_dist_swlo`
+  t 2.07→**1.40**、IC .059→.034；`pivot_width` t 1.36；`price_pos` t .68。**扩宇宙证伪「瓶颈是横截面太窄」
+  假设**：t 随宇宙变宽而降 = 信号非稳健、集中于窄科技同群（sector artifact）、跨板块不泛化。
+  → 结构数值维持缠论引擎内部（bool 门 / 日志），**不暴露为量化因子、不改 `chan_signal.py`（55% 本体零改）**。
+  `structure.py` 留作验证器 + 诚实记录（同 `factor_eval` 保留 pullback 证伪）。**meta 洞察**：R6.1 门（跨年 +
+  overlap 调整 t + 宽宇宙）恰好拦下一个 naive 29 只下 t=2.07「像赢家」的窄样本假象——门起作用了。
+- 涉及：`signals/quant/structure.py`（新，隔离验证器，`chan_signal.py` **零改动**）；未过门 → 不接入
+  `factor_engine.py`、不暴露 `ChanSignalResult`。
 
 #### R6.3 FINRA/FTD 做空情绪 & 逼空风险因子（现有池上过门）
 
