@@ -44,15 +44,23 @@ YEAR_SIGN_MIN = 0.60             # 与全样本同号年份占比（跨年稳定
 CORR_MAX = 0.70                   # 与现有因子最大 |corr|（超过=冗余，剪枝）
 
 # 验证宇宙：**宽于活跃池**的流动性大盘美股（cache 未命中者首跑下载、之后离线复用）。
-# 与 ml_backtest.DEFAULT_UNIVERSE 同源思路，本地定义以解耦（避免引入 lightgbm/全局 warnings 副作用）。
+# 2026-08-02 由 29(偏科技) 扩到 ~78 跨行业大盘：更宽横截面收窄 IC 置信区间、de-confound 板块，
+# 给因子公平的显著性检验（R6.2 首门 29 只下仅 chan_dist_swlo 够 t≥2，疑瓶颈在宇宙宽度非因子）。
 VALIDATION_UNIVERSE = [
-    "AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA",
-    "AVGO", "AMD", "MU", "INTC",
-    "CRM", "ORCL", "ADBE", "NFLX", "PANW",
-    "JPM", "GS", "V", "MA",
-    "LLY", "UNH", "ABBV",
-    "XOM", "CVX",
-    "FTNT", "SNDK", "VRT", "ARM",
+    # 科技 & 半导体
+    "AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA", "AVGO", "AMD", "MU",
+    "INTC", "QCOM", "TXN", "AMAT", "LRCX", "KLAC", "ADI", "MRVL", "CRM", "ORCL",
+    "ADBE", "NOW", "INTU", "NFLX", "PANW", "FTNT", "CRWD", "CSCO", "IBM", "DELL", "ARM",
+    # 消费
+    "HD", "LOW", "NKE", "SBUX", "MCD", "COST", "WMT", "TGT", "PG", "KO", "PEP",
+    # 金融
+    "JPM", "BAC", "WFC", "GS", "MS", "C", "V", "MA", "AXP", "BLK", "SCHW",
+    # 医疗
+    "LLY", "UNH", "JNJ", "ABBV", "MRK", "PFE", "TMO", "ABT", "DHR", "AMGN",
+    # 能源 & 工业
+    "XOM", "CVX", "COP", "CAT", "DE", "BA", "GE", "HON", "UNP", "LMT",
+    # 通信 & 其它
+    "DIS", "CMCSA", "VZ", "VRT", "SNDK",
 ]
 
 
@@ -342,7 +350,7 @@ def main() -> None:
 
     print("\n" + "=" * 72)
     print("基线校准 — 参照因子 IC/IR + 分位 + 跨年 + 相关性（自证实验室口径）")
-    print("（⚠️ ~29 名字横截面偏窄、CI 较宽；稳健的是符号与单调方向，非某位小数）")
+    print("（⚠️ 横截面 CI 随宇宙宽度收窄；稳健的是符号与单调方向，非某位小数）")
     print("=" * 72)
     for col in cols:
         _report_factor(panel, col, [c for c in cols if c != col])
