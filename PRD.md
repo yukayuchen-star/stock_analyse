@@ -490,6 +490,146 @@ flowchart TD
 - 涉及：`backtest/factor_forward.py`（新）、`main.py`（log/eval/report 三处挂载）、
   `signals/quant/momentum.py`（`_special_signal` 暴露 trig 标记）。
 
+### R6 — 因子挖掘与验证体系 Factor Mining & IC/IR·Quantile Validation（2026-08-02 立项）
+
+#### R6.0 立项背景与范围决策 Background & Scope
+
+**来源**：用户观察系统整体表现平庸，提出**基于有效因子开发策略**，给出三类因子挖掘想法 +
+一套正式的因子有效性验证标准，要求把通过验证的因子以加权贡献并入现有缠论×宏观×量化管线。
+
+**明确约束**（用户强调，写入 PRD）：
+- **不写批量爬虫，但可程序化一站式获取**（2026-08-02 用户澄清）——用 Python 包 / 官方文档化文件端点 / 官方 API
+  **自动获取** FINRA/SEC 数据，与现有 yfinance / FRED / Finnhub **同类**（直接 GET 日期参数化的已发布数据文件或
+  调官方 API，**非 HTML 抓取、非跨页链接遍历**）；缓存 / 重试 / 新鲜度纪律与现有源一致。**不设计批量网页爬虫。**
+  目标：`python main.py` 从取数 → 分析 → 出结果全自动，**无手动下载 / 导入步骤**（保留本地文件回退用于离线 / 降级）。
+- **沿用既有节奏**：本轮唯一交付为本 R6 章节（零源码改动），待 user 确认后才进入编码。
+
+**三类因子想法**：
+1. **FINRA/SEC 卖空数据因子**：日度做空量 / Short Volume Ratio / FTD（交割失败）→ 做空情绪因子 + 逼空风险因子。
+2. **缠论原生衍生因子**：把缠论计算转成可量化特征——中枢水平、中枢震荡幅度、背驰强度（MACD 面积 / 力度衰减比）、
+   价格相对摆动高低点位置、段结构形态。
+3. **候选因子加工**：滚动均值、同比 / 环比、横截面排序、去极值、标准化。
+
+**验证标准**（用户指定，是本轮核心交付物）：
+- **IC / IR**：每因子与前向 N 日收益的相关（逐日横截面 Spearman RankIC → 序列均值 / 标准差 = IR），检验稳定性；
+- **分位回测**：按因子值分组，检验高低分位收益分化、单调性、跨年份稳定性；
+- **相关性剪枝**：剔除高相关因子，保留逻辑独立、低相关因子。
+
+**已锁定的两项范围决策**（用户确认）：
+1. **卖空数据 = 纳入，但在现有股票池上过门**。诚实前提：FINRA 日度做空量是**做空流量代理**（≠ 做空兴趣 short
+   interest），且逼空类因子历史上主要在小盘 / 难借券 / 易逼空票有效；在流动性极佳的大盘科技池上 IC 可能近零。
+   → 建 loader + 因子、走 IC / 分位门；**过则并入，不过则如实记录不 merge**。
+2. **缠论原生特征 = 落成 quant sleeve 内新「结构因子」，55% 缠论本体零改动**。缠论引擎内部已算出的数值**只读
+   暴露**、组装为横截面结构因子，不改缠论信号判定逻辑（延续 R5「不碰 55% 本体」边界）。
+
+**防复发纪律**（承接 R1.3 幸存者偏差、R5 量价门教训）：每条候选因子落成**确定性因子**，回测采用与实盘共用的
+as-of 发射逻辑，**过 R6.1 验证门后才进入实盘打分**；in-sample 通过者再经 R6.7 样本外前向验证闭环。
+
+#### R6.1 因子验证实验室 Factor Lab（先建，是一切因子的门）
+
+- 背景：现有 P7 撮合缠论信号、`factor_eval` 只做 momentum special 的布尔触发事件门——**都无法回答「任意连续
+  因子与前向收益的横截面相关性、分位单调性、跨年稳定性、彼此冗余度」**。用户的验证标准需要一个通用因子实验室。
+- 现状：仓库无 IC / IR、无 `qcut` 分位组合、无 Spearman RankIC、无相关性剪枝（仅 `relative.py:62` 有
+  `.rank(pct=True)` 横截面百分位，是 RankIC 思路的「排序半边」，未含 IC 测量半边）。
+- 需求（新 `backtest/factor_lab.py`）：
+  1. **面板**：用 `backtest/ml_backtest.py:build_dataset()` 产出的 `date×ticker×factor` 长表（保留 ticker+date，
+     宽于 14 活跃池、多年）——**不用** `factor_eval.load_price_blobs`（cache blob 哈希、丢 ticker，无法横截面 IC /
+     跨年分组）。前向 5 / 10 / 20 日收益标注复用 `factor_eval` 的 `close.shift(-h)/close-1`。
+  2. **IC / IR**：逐日横截面 Spearman RankIC → 序列均值 = IC、均值 / 标准差 = IR；逐年 IC 表检验稳定性。
+  3. **分位回测**：因子 `qcut` N 组、组均前向收益、high−low 价差、单调性检查（复用 R5.2 三档单调 idiom）、逐年分位稳定。
+  4. **相关性剪枝**：候选因子两两 `|corr|` 矩阵，阈值剔除冗余、保留低相关独立因子。
+  5. **`_selfcheck`**：断言向量化因子值 ≡ 实盘 `compute_*_score` 逐日 as-of（防发射漂移，沿用 `factor_eval._selfcheck` 纪律）；
+     跨年 IC 稳定性复用 `ml_backtest.run_walk_forward` 的 HOLD_DAYS embargo / purge（防标签重叠泄漏）。
+- 验收：`_selfcheck` 绿；对既有五因子回算 IC / 分位作为**基线校准**（自证实验室口径正确）；报告可复现
+  （`python -m backtest.factor_lab`）。
+- **merge 判据**（所有后续因子共用）：|IC| 显著非零 **且** 分位单调 **且** 跨年稳定 **且** 与现有因子低相关；
+  任一不满足 → 如实记录、不 merge。
+- 涉及：`backtest/factor_lab.py`（新）；复用 `ml_backtest.build_dataset` / `factor_eval` / `relative.py`。
+
+#### R6.2 缠论原生结构因子 Chan-Native Structure Factor（harvest+expose → quant sleeve）
+
+- 背景：缠论引擎内部算出的**结构数值**（背驰力度、中枢几何、价格位置）目前被塌成布尔门或只进 `reasoning` 日志、
+  在构造 `ChanSignalResult` 前丢弃——这些正是用户想要的可量化缠论特征。
+- 现状（探查确认）：
+  - MACD 面积比 `curr_area/prev_area`：`_detect_buy/_detect_sell` 内只用于 `<0.8` 布尔门，比值本身被丢弃；
+  - A股 `_trend_strength`（0..1，CCI+BOLL 位置）：已算，只进日志；
+  - 中枢震荡幅度 `(ZG-ZD)/mid`、中枢年龄 `index[-1]-pivot.end_date`、价格带内位置 `(price-ZD)/(ZG-ZD)`、
+    到摆动高低点距离：均可从已暴露的 `current_pivot` / `Stroke.high/low` 一行导出。
+- 需求：
+  1. `ChanSignalResult` **只读暴露**结构数值：`macd_area_ratio`、`pivot_width_pct`、`pivot_age_td`、
+     `price_pos_in_band`、`dist_to_swing_low/high`——改 `_detect_*` 返回元组或让 `compute_chan_signal` 复算两次
+     `_stroke_area`（廉价 masked `hist.abs().sum()`），**不改任何信号判定逻辑与既有字段**；
+  2. 新 `signals/quant/structure.py`：把上述数值组装为横截面结构分（统一 `(score:float, ind:dict)` 签名，
+     接 `factor_engine._run`）。
+- 验收：R6.1 门下结构因子 IC 显著、分位单调、跨年稳定、与现有五因子低相关才 merge；无缠论结果 / 缺中枢时中性回退（0）；
+  暴露字段不改动既有 US / A股 决策与回测逐票输出（回归对比 final_score 无非预期漂移）。
+- 涉及：`signals/chan/chan_signal.py`（只读暴露字段）、`signals/quant/structure.py`（新）、`signals/quant/factor_engine.py`（接入）。
+
+#### R6.3 FINRA/FTD 做空情绪 & 逼空风险因子（现有池上过门）
+
+- 背景：做空流量与交割失败是与价 / 量正交的另一维信息（空头拥挤度、逼空燃料）。
+- 现状：系统无卖空 / FTD 数据源。
+- 需求（**程序化 DataSource，一站式自动，非爬虫**，同 `FREDSource` / `YFinanceSource` 模式）：
+  1. 新 `data/short_data_source.py`——接受共享 `SQLiteCache`，`make_key("finra_shvol", date)` / `make_key("sec_ftd", yyyymm, half)`
+     缓存 + `with_retry` 重试 + TTL（FINRA 日频短、FTD 半月频长）：
+     - **FINRA 日度短量**：GET `https://cdn.finra.org/equity/regsho/daily/CNMSshvol{YYYYMMDD}.txt`（管道分隔，
+       表头 + 尾行，列 `Date|Symbol|ShortVolume|TotalVolume|Market`），`pd.read_csv(sep="|")` 去尾行 → **单份全市场
+       文件含全 ticker** → 按 `Symbol` 取本池票；**Short Volume Ratio = ShortVolume/TotalVolume**。（备选：官方
+       `developer.finra.org` Reg SHO Query API。）
+     - **SEC FTD 半月度**：GET `cnsfails{YYYYMM}{a|b}`（zip，管道分隔，列含 settlement date / CUSIP / **SYMBOL** /
+       issuer / price / fail quantity），解压解析 → 按 `SYMBOL` join（文件自带 symbol，**无需 CUSIP 映射**）；
+       **⚠️ SEC 要求声明 `User-Agent`（`app_name email`）**、公平访问 ≤10 req/s（本用量每日数份、重缓存，天然远低于限）。
+  2. 新鲜度走 `FREDSource` 模板（`STALE_LIMIT_DAYS`：FINRA 日频 ~5d、FTD 半月频 ~30d + `staleness()` + `degraded` 列表）；
+     注册进 `DataPipeline.__init__`、经 `fetch_all` 透传。**本地文件回退**（离线 / 端点故障）复用 `ashare_loader`
+     discover→validate→normalize→dict pattern 作降级路径，主路径为自动获取。
+  3. 新 `signals/quant/short_sentiment.py`——做空情绪（Short Volume Ratio 的滚动均值 / z-score / 环比变化）、
+     逼空风险（高 SVR × 高 FTD × 价升 = 逼空前兆），统一 `(score, ind)` 签名接入。
+- ⚠️ **无前视纪律**：FINRA 日文件 T 日盘后发布、FTD 首半月末发布 / 次半月约次月 15 日发布（~2 周 + 滞后）→ 因子按
+  **发布可得日**对齐（lag），与全系统「末行 = t-1 已完成」口径一致；回测按可得日消费，禁用未来发布的数据。
+- ⚠️ **诚实前提**（锁定决策 1）：大盘科技池上做空流量占比小、套利充分，IC 可能近零；**过 R6.1 门则并入，
+  不过则如实记录不 merge**——不为「有数据源」而强行纳入。
+- 验收：source 单测（端点 mock + 缺文件 / 脏值 / 尾行容错、User-Agent 头断言、可得日 lag 断言）；R6.1 门 IC / 分位 /
+  相关性；数据缺失中性回退 + `degraded` 标记进报告（复用 R3.2 降级纪律）；端到端 `main.py` 全自动取数无手动步骤。
+- 涉及：`data/short_data_source.py`（新）、`data/pipeline.py`（注册 + `fetch_all` 透传）、`config`（端点 / TTL / UA 常量）、
+  `signals/quant/short_sentiment.py`（新）、`main.py`（摄入串接）。
+
+#### R6.4 候选因子变换工具箱 Candidate Transforms
+
+- 背景：用户想法 3（滚动均值 / 同比环比 / 横截面排序 / 去极值 / 标准化）是**服务前述因子的加工层**，非独立因子。
+- 需求：新 `signals/quant/transforms.py`——滚动均值、环比 / 同比、横截面 `rank(pct=True)`（复用 `relative.py` idiom）、
+  去极值（winsorize / MAD）、标准化（z-score / rank）。纯函数、无副作用、可组合。
+- ⚠️ **诚实边界**：变换**仅施于有真实历史的序列**（价 / 量 / 做空流量）；**基本面同比 / 环比排除**——yfinance
+  快照无 PIT 历史、不可回测（R4.4 既定：基本面快照禁入回测），如实记录不做。
+- 验收：单元测试（各变换数值正确 + 无前视：位置 t 仅用 ≤t 数据）；被 R6.2 / R6.3 因子按需调用。
+- 涉及：`signals/quant/transforms.py`（新）。
+
+#### R6.5 集成与权重分配 Integration & Weight Allocation
+
+- 背景：过门的 survivor 因子须并入 quant sleeve，且不能把 momentum 等既有因子稀释到失效。
+- 需求：survivor 经 `factor_engine._run` 接入，新增 `W_*` 常量并**重归一化**（保持 quant 内五 / 六 / 七因子权重和为 1）；
+  相关性剪枝（R6.1）确保新增因子与既有因子逻辑独立、不重复计分。
+- 验收：quant 权重和 = 1 断言；集成前后对未触发新因子的票 final_score 无漂移；背离 / 顶层 55/35/10 权重不受影响。
+- 涉及：`signals/quant/factor_engine.py`（`W_*` + `_run` 接入 + 重归一化）。
+
+#### R6.6 诚实边界 Honest Bounds（反 overclaim，必读）
+
+- **三层稀释**：quant 占 final 10%，单个新因子对 `final_score` 的杠杆 **~≤0.01–0.03**（与 R4.3 RSI / R5.5 结论同构）。
+  R6 的价值在**因子自身精确度、横截面排序质量、假信号削减**，**不在评级剧变**——禁止宣称「提升系统胜率」之类大词，
+  验收只对因子级指标（IC / IR / 分位单调 / 相关性）负责。
+- **不写批量爬虫**：官方数据经文档化文件端点 / 官方 API 程序化获取（与 FRED / yfinance 同类），非 HTML 抓取 /
+  跨页遍历；一站式自动、无手动步骤，另留本地文件回退用于离线 / 降级。SEC 侧遵守其 `User-Agent` 与公平访问约束。
+- **外部阈值须美股重标定**：任何借来的经验阈值（如 SVR / FTD 触发线）一律以本 IC / 分位门在美股数据上重定，不照搬。
+- **卖空因子可能不过门**：大盘池上或近零 IC，如实记录不 merge（锁定决策 1）。
+- **无 PIT 基本面不可回测**：基本面派生变换（growth 同比等）排除（R4.4 既定）。
+
+#### R6.7 样本外前向验证 OOS Forward Validation（survivor）
+
+- 背景：in-sample 通过 ≠ 样本外有效（R5 的 pullback 门 in-sample 疑似有效、实为证伪且方向相反，已警示照搬危险）。
+- 需求：R6.1 过门的 survivor 因子仿 R5.6 `backtest/factor_forward.py` 建**无回填**样本外累积（绝不从历史 cache 回填 =
+  再污染），每日在 `main.py` 记录 final_pool 内因子取值 + 前向收益，逐月累积确认 / 证伪 in-sample 结论。
+- 验收：样本量门槛前不下结论（沿用 R5.6「各桶 ≥N 才判定」纪律）；报告写 `output/{date}/`。
+- 涉及：`backtest/factor_forward.py`（扩展或平行新表）、`main.py`（挂载）。
+
 ### 5.1 优先级与依赖
 
 ```
@@ -500,6 +640,8 @@ R3.1 R3.2 R3.3 ─────────► 第三批（可靠性；R3.2 依�
 R4.1~R4.5 ──────────────► 第四批（R4.2 依赖 R1.3 新基线）
 R5.1 R5.2 ──────────────► 第五批（2026-07-20 立项；R5.4 回测门通过是 merge 前置，
 R5.4 ───────────────────►   R5.3 缓议待 R5.1/R5.2 结论）
+R6.1 ───────────────────► 第六批（2026-08-02 立项；R6.1 验证门是 R6.2/R6.3 merge 前置，先建）
+R6.2 R6.3 R6.4 ─────────►   R6.2/R6.3 过门→R6.5 集成；R6.7 OOS 对 survivor 闭环
 ```
 
 ---
@@ -531,6 +673,7 @@ R5.4 ───────────────────►   R5.3 缓议�
 | R3.x | 断网/断 FRED mock 测试：报告出现 DEGRADED 区块、进程不崩溃 |
 | R4.x | 背离票报告权重显示 70/20/10；评级迁移矩阵人工签核 |
 | R5.x | 因子级 as-of 回测对比报告（纯价格 vs 量能门：胜率/期望/信号数/假信号率）；无 Volume 回退行为不变断言；`echo \| python main.py --non-interactive` 端到端退出码 0 |
+| R6.x | `factor_lab._selfcheck` 向量化≡实盘绿；每因子 IC/IR + 分位单调 + 跨年稳定 + 相关性剪枝报告（过门才 merge、不过如实记录）；short/structure loader 缺数据中性回退 + `degraded` 标记；集成后 quant 权重和=1、未触发票 final_score 无漂移；`echo \| python main.py --non-interactive` 端到端退出码 0 |
 
 ### 7.2 全局回归基线（每批改动后必跑）
 
