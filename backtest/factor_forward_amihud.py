@@ -39,6 +39,13 @@ PRIMARY_H       = 10                  # 主口径
 MIN_NAMES       = 8                   # 单日横截面算 IC 所需最少名字数（与 factor_lab 一致）
 MIN_REGIME_DAYS = 30                  # 单制度桶低于此 IC 日数只做「待累积」提示
 _AMIHUD         = DERIVED_CANDIDATES["amihud_20"]
+
+# ── 记录频率开关 ──────────────────────────────────────────────────
+# 每日记录会自载 78 票验证宇宙（cache 命中即快，但仍有成本）；且前向窗口重叠 10 天 →
+# 相邻日横截面 IC 高度自相关，**每周记一次已足够**（还降低重叠冗余）。此常量=最小记录间隔（日历天）：
+#   1 → 每次运行都记（最密）；5 → 约每周一次（默认，成本≈1/5）；0（或负）→ 关闭 OOS 记录。
+# 幂等 UNIQUE(date,ticker) 仍保证同日重复运行不双记；本闸只是在间隔未到时**跳过昂贵的宇宙加载**。
+LOG_INTERVAL_DAYS = 5
 # in-sample 参照（R7.2 fwd10 IC，随 cache 快照微动，取近似）
 INSAMPLE_REF = {"calm(<15)": 0.027, "normal(15-25)": 0.013,
                 "stress(25-35)": 0.064, "panic(>35)": 0.205}
@@ -86,14 +93,36 @@ def _conn() -> sqlite3.Connection:
     return c
 
 
-# ── 事件记录（每日 as-of，记录验证宇宙每票 amihud + 当日 VIX 制度）──
+def _last_logged_date() -> Optional[str]:
+    """DB 中最近一次记录的 logged_date（无记录返回 None）。"""
+    c = _conn()
+    row = c.execute("SELECT MAX(logged_date) AS d FROM amihud_events").fetchone()
+    c.close()
+    return row["d"] if row and row["d"] else None
+
+
+# ── 事件记录（按 LOG_INTERVAL_DAYS 频率 as-of 记录验证宇宙 amihud + 当日 VIX 制度）──
 def log_amihud_events(date_str: str, pipeline, universe=VALIDATION_UNIVERSE) -> int:
     """as-of 记录验证宇宙每票的 amihud_20（末值）+ 当日 VIX 制度。返回新增数。
 
+    频率由 `LOG_INTERVAL_DAYS` 控制：距上次记录不足间隔则**在加载宇宙前提早跳过**（省成本）。
     自载验证宇宙（cache 命中即离线）以得**同 in-sample 的 78 票横截面**，与 R7.2 直接可比；
     不依赖 main 的小扫描池。VIX 取 FRED VIXCLS 当日末值（与宏观主轴同源）。
     同 (日,票) 已存在则跳过（幂等）。VIX 不可用则跳过当日（无法给制度标签）。
     """
+    # 频率闸：关闭 / 间隔未到 → 在昂贵的宇宙加载之前提早返回
+    if LOG_INTERVAL_DAYS <= 0:
+        logger.debug("[AmihudForward] OOS 记录已关闭 (LOG_INTERVAL_DAYS<=0)")
+        return 0
+    last = _last_logged_date()
+    if last is not None:
+        try:
+            gap = (pd.Timestamp(date_str).normalize() - pd.Timestamp(last).normalize()).days
+        except Exception:
+            gap = LOG_INTERVAL_DAYS  # date_str 异常时不因闸门漏记，照常记录
+        if gap < LOG_INTERVAL_DAYS:
+            logger.debug(f"[AmihudForward] 距上次记录 {gap}d < {LOG_INTERVAL_DAYS}d，跳过当日 OOS 记录")
+            return 0
     try:
         vix_df = pipeline.fred.get_macro("VIXCLS")
         vix = float(vix_df["value"].iloc[-1]) if vix_df is not None and not vix_df.empty else None
