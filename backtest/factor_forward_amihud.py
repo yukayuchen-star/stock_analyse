@@ -54,10 +54,16 @@ DB_PATH = Path("cache") / "forward_signals.db"
 
 
 def _regime(vix: float) -> Optional[str]:
-    """VIX 标量 → 四档制度标签（与 regime_ic / CLAUDE.md 边界一致）。"""
+    """VIX 标量 → 四档制度标签（与 regime_ic 的 pd.cut 边界严格一致）。
+
+    regime_ic.py 用 `pd.cut(right=True)` → 右闭区间 (a,b]，故 VIX=25.00 属 normal、
+    15.00 属 calm、35.00 属 stress。np.digitize 默认 right=False 会把边界值错分到高一档
+    （25→stress），与 in-sample 分桶不一致、污染本模块唯一存在的「制度梯度对比」。
+    故显式 `right=True` 对齐。
+    """
     if vix is None or not np.isfinite(vix):
         return None
-    idx = int(np.digitize([vix], VIX_BINS)[0]) - 1  # bins 含 -inf 起点
+    idx = int(np.digitize([vix], VIX_BINS, right=True)[0]) - 1  # bins 含 -inf 起点
     if 0 <= idx < len(VIX_LABELS):
         return VIX_LABELS[idx]
     return None
@@ -135,10 +141,24 @@ def log_amihud_events(date_str: str, pipeline, universe=VALIDATION_UNIVERSE) -> 
         return 0
 
     prices = _load_universe_prices(universe)
+    if not prices:
+        logger.info("[AmihudForward] 验证宇宙无价格，跳过当日 OOS 记录")
+        return 0
+    # 统一 as-of 交易日 = 宇宙内最新一根K的日期。**只记该日新鲜的票**（末bar==asof），
+    # 全部 stamp 同一 logged_date=asof——否则 stale 票各带自己的末bar日期，横截面被分裂到
+    # 异日，_regime_ic_accum 的 groupby(d) + MIN_NAMES 门会把每片都判不足而整天丢弃
+    # （findings #2/#3）。同一 asof 也让 amihud 测量日 == VIX 制度日，消除 VIX(今)贴 entry(昨)。
+    asof = max(pd.Timestamp(df.index[-1]).normalize()
+               for df in prices.values() if df is not None and not df.empty)
+    asof_str = str(asof.date())
+
     c = _conn()
-    inserted = 0
+    inserted, stale = 0, 0
     for ticker, df in prices.items():
         if df is None or df.empty or "Close" not in df.columns or len(df) < 25:
+            continue
+        if pd.Timestamp(df.index[-1]).normalize() != asof:
+            stale += 1  # 非当日横截面成员（cache 滞后/退市）——本次跳过，下次新鲜再记
             continue
         try:
             a = float(np.asarray(_AMIHUD(df), dtype=float)[-1])
@@ -146,7 +166,6 @@ def log_amihud_events(date_str: str, pipeline, universe=VALIDATION_UNIVERSE) -> 
             logger.debug(f"[AmihudForward] {ticker} amihud 失败: {exc}")
             continue
         entry_price = float(df["Close"].iloc[-1])
-        entry_date  = str(pd.Timestamp(df.index[-1]).date())
         if not np.isfinite(a) or entry_price <= 0:
             continue
         try:
@@ -154,7 +173,7 @@ def log_amihud_events(date_str: str, pipeline, universe=VALIDATION_UNIVERSE) -> 
                 """INSERT OR IGNORE INTO amihud_events
                    (logged_date, ticker, amihud, vix_level, vix_regime, entry_price)
                    VALUES (?,?,?,?,?,?)""",
-                (entry_date, ticker, a, vix, reg, entry_price),
+                (asof_str, ticker, a, vix, reg, entry_price),
             )
             if c.execute("SELECT changes()").fetchone()[0]:
                 inserted += 1
@@ -163,7 +182,8 @@ def log_amihud_events(date_str: str, pipeline, universe=VALIDATION_UNIVERSE) -> 
     c.commit()
     c.close()
     if inserted:
-        logger.info(f"[AmihudForward] 记录 amihud OOS 事件 {inserted} 票 @ VIX={vix:.1f}({reg}) ({date_str})")
+        logger.info(f"[AmihudForward] 记录 amihud OOS 事件 {inserted} 票 @ VIX={vix:.1f}({reg}) "
+                    f"asof={asof_str}" + (f"（{stale} 票滞后跳过）" if stale else ""))
     return inserted
 
 
@@ -186,7 +206,7 @@ def evaluate_amihud_pending(pipeline) -> int:
         by_ticker[row["ticker"]].append(row)
 
     c = _conn()
-    evaluated = 0
+    evaluated, aged_out = 0, 0
     for ticker, rows in by_ticker.items():
         try:
             df = pipeline.get_backtest_price(ticker)
@@ -198,7 +218,10 @@ def evaluate_amihud_pending(pipeline) -> int:
         first_bar = df.index.min()
         for row in rows:
             logged_date, entry_price = row["logged_date"], row["entry_price"]
-            if pd.Timestamp(logged_date) < first_bar or entry_price <= 0:
+            if pd.Timestamp(logged_date) < first_bar:
+                aged_out += 1  # logged_date 早于滚动窗口起点：当前窗口已无法定位入场bar
+                continue
+            if entry_price <= 0:
                 continue
             future = df[df.index > logged_date]
             if len(future) < MAX_H:
@@ -214,6 +237,9 @@ def evaluate_amihud_pending(pipeline) -> int:
     c.close()
     if evaluated:
         logger.info(f"[AmihudForward] 完成评估 amihud OOS 事件 {evaluated} 票")
+    if aged_out:
+        logger.warning(f"[AmihudForward] {aged_out} 个待成熟事件 logged_date 早于回测窗口起点，"
+                       "当前窗口无法成熟（延长 backtest_history_days 或它们将长期挂 pending）")
     return evaluated
 
 
