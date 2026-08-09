@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -9,6 +9,7 @@ from loguru import logger
 from signals.macro.regime          import classify_vix, VIXRegime
 from signals.macro.sector_strength import compute_all_bucket_ir
 from signals.macro.external_factors import compute_external_factors, ExternalFactorsResult
+from signals.macro.vix_timing       import compute_vix_timing, VixTimingResult
 
 
 # ── 宏观得分权重（合计=1.0）────────────────────────────────────
@@ -57,6 +58,9 @@ class MacroSignalResult:
     # 非空时报告头部必须展示——禁止静默中性化后照常给建议不留痕。
     degraded: list = field(default_factory=list)
 
+    # R8 市场级 VIX 大盘拐点择时（第三轴：均值回归/制度反转；门控叠加非计分）
+    swing_timing: Optional[VixTimingResult] = None
+
     # 综合
     score:     float = 0.0   # -1~1
     reasoning: str   = ""
@@ -69,15 +73,19 @@ def compute_macro_signal(
     prices:   Dict[str, pd.DataFrame],
     buckets:  Dict[str, list],
     degraded: list | None = None,
+    vix_series: Optional[pd.Series] = None,
+    index_b1: bool = False,
 ) -> MacroSignalResult:
     """
     计算宏观信号。
 
     Args:
         snapshot: FRED 最新值快照 {series_id: float}，含 VIXCLS / DGS10 / DGS2
-        prices:   全股票池价格字典（含 QQQ），用于桶强度计算
+        prices:   全股票池价格字典（含 QQQ/SPY），用于桶强度 + R8 大盘择时
         buckets:  BUCKETS 配置 {bucket_name: [ticker, ...]}
         degraded: 数据层已知降级项（pipeline.get_macro_snapshot 的第二返回值）
+        vix_series: VIX 历史序列（FRED VIXCLS，与回测同源）；None 时回退 prices["^VIX"]
+        index_b1: 调用方对 QQQ/SPY 跑缠论得「任一指数出 b1 背驰」，把抄底 SETUP 升 CONFIRMED
     """
     degraded = list(degraded or [])
 
@@ -114,6 +122,25 @@ def compute_macro_signal(
     bucket_ir, bucket_scores = compute_all_bucket_ir(buckets, prices, lookback=60)
     bucket_avg = float(np.mean(list(bucket_scores.values()))) if bucket_scores else 0.0
 
+    # ── 4.5 R8 市场级 VIX 大盘拐点择时（第三轴：门控叠加，不进 score）──
+    swing = None
+    try:
+        vser = vix_series
+        if vser is None and prices.get("^VIX") is not None and not prices["^VIX"].empty:
+            vser = prices["^VIX"]["Close"]
+        index_prices = {k: prices[k] for k in ("QQQ", "SPY")
+                        if prices.get(k) is not None and not prices[k].empty}
+        if vser is not None and index_prices:
+            swing = compute_vix_timing(vser, index_prices, index_b1=index_b1)
+            logger.info(f"[Macro] R8择时: {swing.reasoning}")
+            for a in swing.alerts:
+                logger.warning(f"[Macro] {a}")
+        else:
+            degraded.append("SWING_TIMING_SKIP(缺VIX序列或QQQ/SPY)")
+    except Exception as exc:
+        logger.warning(f"[Macro] R8择时计算失败: {exc}")
+        degraded.append(f"SWING_TIMING_ERR({exc})")
+
     # ── 5. 综合得分 ──────────────────────────────────────────
     score = float(np.clip(
         W_VIX      * regime.score
@@ -134,6 +161,8 @@ def compute_macro_signal(
         f"buckets=[{bucket_str}] avg={bucket_avg:+.2f} "
         f"→ macro_score={score:+.3f} pos_limit={regime.position_limit:.0%}"
     )
+    if swing is not None and (swing.bottom_state != "NONE" or swing.top_state != "NONE"):
+        reasoning += f" | 🎯大盘择时[抄底={swing.bottom_state}/逃顶={swing.top_state}]"
     if external.anomalies:
         reasoning += f" | 宏观异动({len(external.anomalies)}项)!"
     if degraded:
@@ -157,6 +186,7 @@ def compute_macro_signal(
         bucket_scores  = bucket_scores,
         external       = external,
         degraded       = degraded,
+        swing_timing   = swing,
         score          = round(score, 4),
         reasoning      = reasoning,
     )

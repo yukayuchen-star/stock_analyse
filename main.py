@@ -20,6 +20,7 @@ from data.pipeline import DataPipeline
 from data.universe import get_universe
 from signals.quant.factor_engine import compute_quant_signal, QuantSignalResult
 from signals.macro.macro_signal  import compute_macro_signal
+from signals.macro.vix_timing_report import write_vix_timing_report
 from signals.chan.chan_signal    import compute_chan_signal, ChanSignalResult
 from signals.screening           import (
     ScreeningCandidate, screen_for_adds, screen_for_removes,
@@ -537,8 +538,26 @@ def run(non_interactive: bool = False,
 
     # ── P3 宏观 ──────────────────────────────────────────
     logger.info("── P3 宏观信号层 ──")
+    # R8 大盘择时输入：指数 b1 背驰确认（抄底 SETUP→CONFIRMED）+ VIX 序列（与回测同源 FRED VIXCLS）
+    index_b1 = False
+    try:
+        for _ix in ("QQQ", "SPY"):
+            if prices.get(_ix) is not None and not prices[_ix].empty:
+                _r = compute_chan_signal(_ix, prices)
+                if _r.buy_point_type == "b1" and _r.divergence:
+                    index_b1 = True
+                    break
+    except Exception as _e:
+        logger.warning(f"  指数 b1 确认失败: {_e}")
+    try:
+        _vdf = pipeline.fred.get_macro("VIXCLS")
+        _vix_series = _vdf["value"] if _vdf is not None and not _vdf.empty else None
+    except Exception:
+        _vix_series = None
+
     macro = compute_macro_signal(snapshot, prices, buckets,
-                                 degraded=data.get("macro_degraded", []))
+                                 degraded=data.get("macro_degraded", []),
+                                 vix_series=_vix_series, index_b1=index_b1)
     logger.info(
         f"  VIX={macro.vix_level:.1f} [{macro.vix_regime}] "
         f"仓位上限={macro.position_limit:.0%}  "
@@ -549,6 +568,13 @@ def run(non_interactive: bool = False,
         f"{k}={macro.bucket_ir[k]:+.3f}(score={macro.bucket_scores[k]:+.2f})"
         for k in macro.bucket_ir
     ))
+    # R8 大盘择时决策参考 MD（当日状态 + 完整规则/预警）
+    if macro.swing_timing is not None:
+        st = macro.swing_timing
+        logger.info(f"  🎯 大盘择时: 抄底={st.bottom_state} 逃顶={st.top_state} | {st.reasoning}")
+        for _a in st.alerts:
+            logger.warning(f"  {_a}")
+    write_vix_timing_report(date_str, output_dir, macro.swing_timing)
 
     # ── P5 决策 ──────────────────────────────────────────
     logger.info("── P5 决策层 ──")

@@ -774,6 +774,38 @@ R7 用三条互不相同的路攻这个 t<2，均复用 R6.1 `factor_lab` 门；
 > （承接 R6「Mag7 碾压小盘」的制度约束）；③ R5.6 式无回填 OOS 确认。此为 R6 amihud 线索的正确延续：
 > 它是**压力-beta 因子**，非独立非流动性 alpha。
 
+### 第八批 R8 — 市场级 VIX 大盘拐点择时（第三轴：均值回归/制度反转）（2026-08-08）
+
+**背景**：用户观察系统只做顺势跟踪 + 二/三类买卖点，**抓不到大盘摆动高低点**；提出基于 VIX 的大盘择时研究
+（临界 28/32/40/60）。**强洞察**：原两轴（缠论 55% 顺势延续 + VIX 门 35% 同步节流）**同向**，且存在张力
+——旧门控**顺周期**（VIX>35→仓位0%）而本策略**逆周期**（恐慌里抄底）。R8 即补上缺失的**逆势/领先**轴，
+与缠论正交、与 VIX 节流阀由 governed sleeve 化解张力。呼应 R7：R7 说压力期**持谁**（高 beta），R8 说**何时**（VIX 尖峰+回撤+掉头）。
+
+**规则（无前视）**：
+- **抄底分级**：ZONE(VIX≥28 且 QQQ|SPY 对120日峰值回撤≥10%) → SETUP(+VIX 掉头：自近20日尖峰回落≥10%且跌破 EMA10)
+  → CONFIRMED(+指数缠论 b1 背驰)。VIX 分档→逆势 sleeve 上限 28-32→30%/32-40→50%/40-60→75%/≥60→100%。
+- **逃顶（减仓非做空）**：WATCH(VIX 抬高波谷，右端确认) → WARNING(+指数上行减速)。
+- 无前视：回撤对滚动峰值；VIX 波谷/波峰用 3 根右端确认（同缠论定笔）；一切 close[≤t]。
+
+**用户决策（AskUserQuestion）**：① governed 逆势 sleeve（CONFIRMED 解锁独立仓、可越 panic 门，顺势仓仍节流）；
+② 逃顶 trim-only（新仓×0.5 + 止盈提示，不做空）；③ **wiring 前先 backtest**。
+
+> 🟢 **R8 触发器样本内回测（`backtest/vix_timing_backtest.py`，QQQ/SPY+FRED VIXCLS，2021-08→2026-08，前向指数收益）**：
+> **用户原始裸规则 V0(VIX≥28+回撤≥10%) 是接飞刀**——QQQ fwd10 **−0.28%（胜40%）**，跑输基线(+0.63%)；
+> 加 **VIX 掉头** 的 V1(SETUP) 跃升为强触发——fwd10 **+3.69%（胜83%）**、fwd20 **+4.47%（胜75%）** ≫ 基线；
+> V2(+指数b1) 方向更强但 n=2 待 OOS；TOP_WARNING fwd20 **−0.53%** < 基线 +1.25% = 减仓有据。
+> **胜负手 = VIX 掉头确认**（把「区域」升级为「触发」，不接飞刀）。据此 wire：V1 为抄底触发、V0 仅 watch、逃顶 trim。
+
+**落地（已 merge，门控叠加不进 0.55/0.35/0.10 线性 score）**：
+- 新 `signals/macro/vix_timing.py`（检测器，序列级 no-lookahead，live/回测共用）；
+- 新 `backtest/vix_timing_backtest.py`（触发器回测）；新 `signals/macro/vix_timing_report.py`（决策参考 MD 生成器）；
+- `MacroSignalResult.swing_timing` 字段 + `compute_macro_signal` 计算（VIX 序列 + 指数 b1 入参，向后兼容）；
+- `decision/risk_overlay.py` governed sleeve（CONFIRMED 越 panic 门 / WARNING trim）；`report/report_writer.py` 大盘择时区块；
+- `main.py` 三处挂载（指数 b1 确认 + VIX 序列 → macro；每日出 `output/{date}/vix_market_timing.md`）。
+
+**诚实边界**：样本内 n 小（恐慌 episode 稀少、CONFIRMED n=2）→ 待挂 R5.6 式无回填 OOS 累积；右端确认致逃顶天然滞后数日；
+减仓非做空（守保守单边）；门控非造信号。
+
 ### 5.1 优先级与依赖
 
 ```

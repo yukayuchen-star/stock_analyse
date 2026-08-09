@@ -46,10 +46,21 @@ def apply_risk_overlay(
     vix_regime     = macro.vix_regime
     position_limit = macro.position_limit
 
+    swing = getattr(macro, "swing_timing", None)
+
     # ── 仓位计算 ──────────────────────────────────────────────
     if vix_regime == "panic":
-        flags.append("VIX_PANIC: 全市场恐慌，禁止开新仓")
-        suggested_pos = 0.0
+        # R8 governed 逆势 sleeve：仅**确认**大盘抄底（VIX掉头+指数b1背驰）解锁独立逆势仓，
+        # 可越 panic 0% 门（回测：SETUP fwd20 QQQ +4.5% vs 基线 +1.3%）；普通顺势仓仍 0。
+        # tranche 为**组合级** sleeve 上限（跨名分摊，此处按单名封顶，语义同 position_limit）。
+        if swing is not None and swing.bottom_state == "CONFIRMED" and final_score > 0:
+            tr = swing.suggested_tranche
+            suggested_pos = round(min(max(0.0, final_score), tr), 2)
+            flags.append(f"BOTTOM_SLEEVE: 确认大盘抄底[{swing.vix_tier}]解锁逆势仓≤{tr:.0%}"
+                         f"（越 panic 门；组合级上限，多名分摊）")
+        else:
+            flags.append("VIX_PANIC: 全市场恐慌，禁止开新仓")
+            suggested_pos = 0.0
     else:
         raw_pos = max(0.0, final_score)
 
@@ -70,6 +81,13 @@ def apply_risk_overlay(
             flags.append("VIX_TENSE: 高波动，严控仓位")
 
         suggested_pos = round(min(raw_pos, position_limit), 2)
+
+        # R8 逃顶预警：减仓非做空（保守单边）——新仓上限折半 + 止盈/收紧止损提示
+        # 回测：TOP_WARNING fwd20 前向收益低于基线（QQQ −1.8%、SPY −0.8%）→ 减仓有据。
+        if swing is not None and swing.top_state == "WARNING" and suggested_pos > 0:
+            suggested_pos = round(suggested_pos * 0.5, 2)
+            flags.append("TOP_WARNING_TRIM: 大盘逃顶预警（VIX抬高波谷+指数减速），"
+                         "新仓上限折半，建议对存量止盈/收紧止损")
 
     # ── R_MAX 门控：结构止损离入场太远则不宜追，降级 Hold ─────
     # 缠论买点的结构止损(chan.stop_loss)由 _calc_stop_and_r 确定，

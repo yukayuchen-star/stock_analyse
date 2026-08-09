@@ -237,6 +237,21 @@ def _daily_summary(
             lines.append(f"> {alert}")
         lines.append("")
 
+    # R8 市场级 VIX 大盘拐点择时（第三轴：均值回归/制度反转）
+    sw = getattr(macro, "swing_timing", None)
+    if sw is not None and (sw.bottom_state != "NONE" or sw.top_state != "NONE"):
+        lines += [
+            "### 🎯 大盘择时（VIX 拐点 · 详见 vix_market_timing.md）",
+            "",
+            f"- 抄底状态：`{sw.bottom_state}`"
+            + (f"（{sw.vix_tier}，逆势 sleeve≤{sw.suggested_tranche:.0%}）" if sw.vix_tier else "")
+            + f"　逃顶状态：`{sw.top_state}`",
+            f"- VIX={sw.vix:.1f}（掉头={sw.vix_rollover}）　最大回撤 {sw.max_drawdown:.0%}@{sw.dd_index}",
+        ]
+        for a in sw.alerts:
+            lines.append(f"> {a}")
+        lines.append("")
+
     # 桶强度
     if macro.bucket_ir:
         lines += [
