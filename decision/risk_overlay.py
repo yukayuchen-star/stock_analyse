@@ -23,6 +23,9 @@ _STOP_PCT = {
 }
 _TP_RATIO = 2.0   # 止盈 = R × 2（2:1 风险回报）
 _R_MAX    = 0.15  # 结构止损 R > 15% → 离支撑太远，降级 Hold（与 A 股对齐）
+# R8 逆势 sleeve 分级：SETUP 已带 +2.8% 稳定边（回测 12 episode，全 horizon），
+# 但 CONFIRMED(需指数b1)历史仅 2 次且漏掉 2025-04 整段抄底 → SETUP 缩额解锁、CONFIRMED 满额。
+_SETUP_SLEEVE_SCALE = 0.6
 
 
 @dataclass
@@ -50,14 +53,17 @@ def apply_risk_overlay(
 
     # ── 仓位计算 ──────────────────────────────────────────────
     if vix_regime == "panic":
-        # R8 governed 逆势 sleeve：仅**确认**大盘抄底（VIX掉头+指数b1背驰）解锁独立逆势仓，
-        # 可越 panic 0% 门（回测：SETUP fwd20 QQQ +4.5% vs 基线 +1.3%）；普通顺势仓仍 0。
-        # tranche 为**组合级** sleeve 上限（跨名分摊，此处按单名封顶，语义同 position_limit）。
-        if swing is not None and swing.bottom_state == "CONFIRMED" and final_score > 0:
-            tr = swing.suggested_tranche
+        # R8 governed 逆势 sleeve（阈值回测定标 2026-08-09）：**分级**解锁独立逆势仓，可越 panic 0% 门。
+        # SETUP(VIX掉头) 缩额 ×0.6 解锁——回测 12 episode、fwd10/20/60 全带 +2.8% 稳定边；
+        # CONFIRMED(+指数b1) 满额——结构确认加码，但历史仅 2 次且漏掉 2025-04 抄底，故只做加码不做门。
+        # 普通顺势仓仍 0；tranche 为**组合级** sleeve 上限（跨名分摊，此处按单名封顶，语义同 position_limit）。
+        if swing is not None and swing.bottom_state in ("SETUP", "CONFIRMED") and final_score > 0:
+            confirmed = swing.bottom_state == "CONFIRMED"
+            tr = swing.suggested_tranche * (1.0 if confirmed else _SETUP_SLEEVE_SCALE)
             suggested_pos = round(min(max(0.0, final_score), tr), 2)
-            flags.append(f"BOTTOM_SLEEVE: 确认大盘抄底[{swing.vix_tier}]解锁逆势仓≤{tr:.0%}"
-                         f"（越 panic 门；组合级上限，多名分摊）")
+            tag = "确认" if confirmed else "预备"
+            flags.append(f"BOTTOM_SLEEVE({swing.bottom_state}): {tag}大盘抄底[{swing.vix_tier}]"
+                         f"解锁逆势仓≤{tr:.0%}（越 panic 门；组合级上限，多名分摊）")
         else:
             flags.append("VIX_PANIC: 全市场恐慌，禁止开新仓")
             suggested_pos = 0.0

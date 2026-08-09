@@ -91,9 +91,9 @@ def build_vix_timing_doc(date_str: str, swing: Optional[VixTimingResult]) -> str
     L.append(f"| ⚪ **ZONE** | VIX≥{VIX_ELEVATED:.0f} 且 (QQQ 或 SPY 对{DD_PEAK_WIN}日峰值回撤≥{DD_MIN:.0%}) | "
              f"**观察勿动手**（恐惧未见顶=接飞刀；回测该裸规则 fwd10 −0.28%） |")
     L.append(f"| 🟡 **SETUP** | ZONE + **VIX 掉头**（自近20日尖峰回落≥{ROLLOVER_RETRACE:.0%} 且跌破 EMA{10}） | "
-             f"**分批建逆势仓**（回测 fwd20 +4.5% 胜75%，主触发） |")
+             f"**分批建逆势仓 ≤tier×0.6**（回测主触发，12 episode、fwd10/20/60 全带 +2.8% 稳定边） |")
     L.append(f"| 🟢 **CONFIRMED** | SETUP + **指数缠论 b1 背驰**（创新低+MACD衰竭） | "
-             f"**满逆势 tranche**（两轴锁；解锁越 panic 门的 sleeve） |")
+             f"**满逆势 tranche（tier×1.0，结构加码）**（两轴锁；解锁越 panic 门的 sleeve） |")
     L.append("")
     L.append("**VIX 分档 → 逆势 sleeve 上限**（组合级，跨名分摊）：")
     L.append("")
@@ -109,8 +109,9 @@ def build_vix_timing_doc(date_str: str, swing: Optional[VixTimingResult]) -> str
 
     # ── 三、决策层耦合（怎么影响下单）──
     L.append("## 三、与交易框架的耦合（governed）")
-    L.append("- **抄底 CONFIRMED** → risk_overlay 解锁**独立逆势 sleeve**（可越 VIX>35 的 0% 仓位门），"
-             "上限按 VIX 档；普通顺势买点在 panic 仍被节流为 0（sleeve 与顺势仓分离）。")
+    L.append("- **抄底分级解锁**（2026-08-09 阈值回测定标）→ risk_overlay 开**独立逆势 sleeve**（越 VIX>35 的 0% 门）："
+             "**SETUP → tier×0.6**（缩额，主触发有稳定边）、**CONFIRMED → tier×1.0**（结构确认满额加码）；"
+             "ZONE 仍不解锁（勿接飞刀），普通顺势买点在 panic 仍节流为 0（sleeve 与顺势仓分离）。")
     L.append("- **逃顶 WARNING** → 新仓上限×0.5 + `TOP_WARNING_TRIM` 标记（减仓非做空）。")
     L.append("- 择时为**门控叠加**，**不进** 0.55/0.35/0.10 线性 final_score（守 macro=制度门控 之职）。")
     L.append("")
@@ -122,6 +123,12 @@ def build_vix_timing_doc(date_str: str, swing: Optional[VixTimingResult]) -> str
     L.append("")
     L.append("**读法**：用户原始「VIX≥28+回撤≥10%」裸规则回测**接飞刀**（fwd10 负、胜40%）；加 **VIX 掉头** 后"
              "跃升为强触发（fwd20 +4.5%/胜75%）——**掉头确认是本策略的胜负手**。逃顶前向收益稳定低于基线=减仓有据。")
+    L.append("")
+    L.append("**阈值敏感性（2026-08-09 网格回测）**：① VIX掉头的 retrace 0–12% 是 plateau（EMA10 cross 才是真杠杆，"
+             "非 retrace 深度）→ 10%/EMA10 落在稳健区，保留。② **SETUP vs CONFIRMED**：SETUP 12 episode、全 horizon "
+             "+2.8% 稳定边；CONFIRMED 历史仅 2 次、fwd60 边转负、且**漏掉 2025-04 整段抄底** → 定为「SETUP 缩额解锁、"
+             "CONFIRMED 满额加码」而非 CONFIRMED-only 门。③ 逃顶 **中位数各 horizon 仍为正**（fwd20 +0.5%），负边全来自"
+             "**左尾**（fwd60 有 15% 概率跌>10%）→ WARNING 是**尾部对冲**非方向做空，×0.5 折半（留一半正中位漂移、砍一半尾部）合适。")
     L.append("")
 
     # ── 五、诚实边界 ──
