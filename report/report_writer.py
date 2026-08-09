@@ -8,7 +8,7 @@ write_all_reports() 入口，为每日运行生成：
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from signals.chan.chan_signal     import ChanSignalResult
 from signals.quant.factor_engine import QuantSignalResult
@@ -366,22 +366,153 @@ def _daily_summary(
     return "\n".join(lines)
 
 
+# ── 精简每日执行单（live 每日照此下单）───────────────────────────
+
+def _daily_action_sheet(
+    decisions: Dict[str, StockDecision],
+    macro:     MacroSignalResult,
+    state:     dict,
+    date_str:  str,
+) -> str:
+    """精简执行单：①今日判断 ②今日买卖点 ③当前仓位。数据取自组合 state（已按 60% 上限成交的**真实**结果）。"""
+    hist = state.get("history", [])
+    cur = hist[-1] if hist else None
+    positions = state.get("positions", {})
+    trades_today = [t for t in state.get("trades", []) if cur and t["date"] == cur["date"]]
+    initial = state.get("initial_capital", 0.0)
+
+    L: List[str] = [f"# 今日操作单 — {date_str}", ""]
+
+    # ── 一、今日判断（简）──
+    regime = _VIX_DESC.get(macro.vix_regime, macro.vix_regime)
+    L += ["## 一、今日判断", "",
+          f"- 大盘环境：VIX **{macro.vix_level:.1f}**[{regime}]　仓位上限(VIX门) {macro.position_limit:.0%}　"
+          f"宏观得分 {macro.score:+.2f}"]
+    sw = getattr(macro, "swing_timing", None)
+    stance = "常规：按买卖点执行，总仓≤60%。"
+    if sw is not None:
+        if sw.top_state == "WARNING":
+            stance = "🔴 **逃顶预警：只减不加**，对存量止盈/收紧止损，新仓上限已自动折半。"
+        elif sw.top_state == "WATCH":
+            stance = "🟠 逃顶监控：VIX 抬高波谷，暂不加仓，等动量确认。"
+        elif sw.bottom_state in ("SETUP", "CONFIRMED"):
+            stance = (f"🟢 **抄底窗口[{sw.bottom_state}]**：VIX 已掉头，逆势 sleeve 可越 panic 门"
+                      f"（上限≤{sw.suggested_tranche:.0%}）。")
+        elif sw.bottom_state == "ZONE":
+            stance = "⚪ 抄底区域但 **VIX 未掉头 → 勿接飞刀**，等掉头确认再动手。"
+        if sw.bottom_state != "NONE" or sw.top_state != "NONE":
+            L.append(f"- 大盘择时：抄底`{sw.bottom_state}` / 逃顶`{sw.top_state}`（VIX 掉头={sw.vix_rollover}，"
+                     f"最大回撤 {sw.max_drawdown:.0%}@{sw.dd_index}）")
+    L += [f"- **今日策略取向**：{stance}", ""]
+
+    # ── 二、今日买卖点（来自真实成交）──
+    L += ["## 二、今日买卖点", ""]
+    sells = [t for t in trades_today if t["action"] == "卖出"]
+    buys  = [t for t in trades_today if t["action"] == "买入"]
+    if not sells and not buys:
+        L += ["> 今日无成交（无满足条件的买卖点，或已被 60% 仓位上限/现金挡下——见文末候补）。", ""]
+    if sells:
+        L += ["### 🔺 卖出", "",
+              "| 代码 | 卖价 | 股数 | 盈亏 | 原因 |", "|--|--|--|--|--|"]
+        for t in sells:
+            L.append(f"| **{t['code']}** | {t['price']:.2f} | {t['shares']} | ${t['pnl']:+,.0f} | {t['reason']} |")
+        L.append("")
+    if buys:
+        L += ["### 🟢 买入", "",
+              "| 代码 | 买点 | 买价 | 结构止损 | 第一止盈 | 股数 | 金额 | 占权益 |",
+              "|--|--|--|--|--|--|--|--|"]
+        equity = cur["equity"] if cur else initial
+        for t in buys:
+            d = decisions.get(t["code"])
+            bp = "—"
+            stop = tp = None
+            if d is not None:
+                if d.chan_signal and d.chan_signal.buy_point_type:
+                    bp = d.chan_signal.buy_point_type.upper()
+                stop, tp = d.stop_loss, d.take_profit
+            cost = t["price"] * t["shares"]
+            stop_s = f"{stop:.2f}" if stop else "—"
+            tp_s = f"{tp:.2f}" if tp else "—"
+            L.append(f"| **{t['code']}** | {bp} | {t['price']:.2f} | {stop_s} | {tp_s} | "
+                     f"{t['shares']} | ${cost:,.0f} | {cost/equity:.0%} |")
+        L.append("")
+
+    # ── 三、当前仓位 ──
+    L += ["## 三、当前仓位（次日初始持仓）", ""]
+    if cur:
+        mv, cash, equity = cur["market_value"], cur["cash"], cur["equity"]
+        L += [f"- 总权益 **${equity:,.0f}**　持仓 **${mv:,.0f}（{mv/equity:.0%}）**　"
+              f"现金 ${cash:,.0f}（{cash/equity:.0%}）　累计盈亏 {cur['total_pnl_pct']:+.2%}",
+              f"- 持仓上限 60% → 剩余可加仓额度约 **${max(0.0, 0.60*equity - mv):,.0f}**", ""]
+    if positions:
+        L += ["| 代码 | 买入价 | 现价 | 浮盈 | 股数 | 市值 | 止损 |", "|--|--|--|--|--|--|--|"]
+        price_now = {c: (float(decisions[c].current_price)
+                         if c in decisions and getattr(decisions[c], "current_price", 0) else pos["cost_price"])
+                     for c, pos in positions.items()}
+        for code, pos in sorted(positions.items(), key=lambda kv: kv[1]["buy_date"]):
+            px = price_now.get(code, pos["cost_price"])
+            pnl = (px - pos["cost_price"]) / pos["cost_price"] if pos["cost_price"] else 0.0
+            sl = f"{pos['stop_loss']:.2f}" if pos.get("stop_loss") else "—"
+            L.append(f"| {code} | {pos['cost_price']:.2f} | {px:.2f} | {pnl:+.1%} | "
+                     f"{pos['shares']} | ${pos['shares']*px:,.0f} | {sl} |")
+        L.append("")
+    else:
+        L += ["> 当前空仓。", ""]
+
+    # ── 候补：想买但被上限/现金挡下 ──
+    held = set(positions.keys())
+    bought_today = {t["code"] for t in buys}
+    queued = [d for d in sorted(decisions.values(), key=lambda x: x.final_score, reverse=True)
+              if d.rating in ("Buy", "Overweight") and d.suggested_position > 0
+              and d.ticker not in held and d.ticker not in bought_today]
+    if queued:
+        L += ["## 候补（评级达标，暂被 60% 上限/现金挡下）", ""]
+        for d in queued:
+            bp = (d.chan_signal.buy_point_type.upper()
+                  if d.chan_signal and d.chan_signal.buy_point_type else "—")
+            L.append(f"- {d.ticker} [{bp} {d.final_score:+.2f}] 建议仓位 {d.suggested_position:.0%}"
+                     f"（腾出额度/现金后优先补入）")
+        L.append("")
+
+    L += ["---", "> 执行提示：成交价=信号日收盘；实盘次日开盘下单会有滑点。止损为**结构位**，跌破即离场。"]
+    return "\n".join(L)
+
+
 # ── 公共入口 ──────────────────────────────────────────────────
+
+def write_daily_action_sheet(
+    decisions:  Dict[str, StockDecision],
+    macro:      MacroSignalResult,
+    state:      dict,
+    date_str:   str,
+    output_dir: Path,
+) -> Path:
+    """写精简每日执行单 output/{date}/今日操作.md（live 每日照此下单）。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "今日操作.md"
+    path.write_text(_daily_action_sheet(decisions, macro, state, date_str), encoding="utf-8")
+    return path
+
 
 def write_all_reports(
     decisions:  Dict[str, StockDecision],
     macro:      MacroSignalResult,
     date_str:   str,
     output_dir: Path,
+    detail_tickers: Optional[set] = None,
 ) -> List[Path]:
     """
-    生成所有报告文件，返回已写入的路径列表。
+    生成汇总 + 个股报告，返回已写入的路径列表。
     output_dir 应为 Path(settings.output_dir) / date_str。
+    detail_tickers: 若给定，仅为这些代码写个股 {TICKER}.md（精简输出，只留可操作/持仓票）；
+    None 则全量（保留原行为）。
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     written: List[Path] = []
 
     for ticker, d in decisions.items():
+        if detail_tickers is not None and ticker not in detail_tickers:
+            continue
         path = output_dir / f"{ticker}.md"
         path.write_text(_stock_report(d, date_str), encoding="utf-8")
         written.append(path)

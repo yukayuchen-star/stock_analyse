@@ -69,8 +69,12 @@ def save_portfolio(path: Path, state: dict) -> None:
 
 
 def update_portfolio(state: dict, date_str: str, signals: List[Signal],
-                     lot_size: int = 1) -> dict:
+                     lot_size: int = 1, max_exposure_frac: float = 1.0) -> dict:
     """就地推进组合一天：先卖后买，记快照。返回 state。
+
+    max_exposure_frac: 总持仓上限（占当前权益）。新买入受约束使**买入后**持仓市值
+    ≤ max_exposure_frac × 权益（权益=现金+持仓市值，先卖后算）；默认 1.0=不设组合级上限
+    （A股沿用原行为）。仅约束新买入，不强制卖出因升值漂过上限的赢家（避免无谓换手）。
 
     幂等保护：若当日已记过快照（history 末条 date==date_str），先回滚当日成交与快照，
     避免同一天重复运行把仓位记重（重算后覆盖当日结果）。
@@ -109,17 +113,29 @@ def update_portfolio(state: dict, date_str: str, signals: List[Signal],
             })
             del positions[code]
 
-    # ── 2. 再买（按排名优先，受现金约束）──
+    # ── 2. 再买（按排名优先，受现金 + 组合级持仓上限约束）──
     # 同票当日既有卖出信号又有买入评级 → 以卖为准，当日不回补（防卖后即买的洗仓）
     buys = sorted([s for s in signals
                    if s.is_buy and not s.is_sell
                    and s.code not in positions and s.price > 0],
                   key=lambda s: (s.rank if s.rank else 1e9))
+
+    # 总持仓上限（占权益）：先卖后按当日价估权益，锁定买入预算上限。买入以现价换股不改权益，
+    # 故上限在买入循环内恒定；deployed 随买入增长，逼近上限即停买。
+    def _deployed_mv() -> float:
+        return sum(pos["shares"] * price_of.get(c, pos["cost_price"])
+                   for c, pos in positions.items())
+    equity_now  = state["cash"] + _deployed_mv()
+    exposure_cap = max(0.0, max_exposure_frac) * equity_now   # 持仓市值不得超过此值
+
     for s in buys:
+        room = exposure_cap - _deployed_mv()      # 距组合上限的剩余可买额度
+        if room <= 0:
+            break
         target_value = max(0.0, s.position_frac) * initial
         if target_value <= 0:
             continue
-        budget = min(target_value, state["cash"])
+        budget = min(target_value, state["cash"], room)
         raw_shares = budget / s.price
         shares = int(raw_shares // lot_size) * lot_size if lot_size > 1 else int(raw_shares)
         if shares <= 0:

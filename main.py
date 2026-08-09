@@ -10,7 +10,7 @@ import utils.logger  # 触发 setup_logger()
 from config.settings   import settings
 from config.stocks     import (
     STOCK_POOL, BENCHMARKS, BUCKETS,
-    PORTFOLIO_INITIAL_CAPITAL, PORTFOLIO_LOT_SIZE,
+    PORTFOLIO_INITIAL_CAPITAL, PORTFOLIO_LOT_SIZE, MAX_PORTFOLIO_EXPOSURE,
 )
 from config.pool_manager import (
     PoolChange, append_pool_changes, load_dynamic_pool, load_us_watchlist,
@@ -33,7 +33,7 @@ from decision.hysteresis         import apply_hysteresis
 from decision.portfolio_core     import (
     Signal, load_portfolio, save_portfolio, update_portfolio,
 )
-from report.report_writer        import write_all_reports
+from report.report_writer        import write_all_reports, write_daily_action_sheet
 from backtest.engine             import run_all_backtests
 from backtest.report             import write_backtest_report
 from backtest.forward_tracker    import (
@@ -340,7 +340,8 @@ def _run_portfolio(decisions: Dict[str, StockDecision],
         ))
 
     state = load_portfolio(_PORTFOLIO_PATH, PORTFOLIO_INITIAL_CAPITAL)
-    update_portfolio(state, date_str, signals, lot_size=PORTFOLIO_LOT_SIZE)
+    update_portfolio(state, date_str, signals, lot_size=PORTFOLIO_LOT_SIZE,
+                     max_exposure_frac=MAX_PORTFOLIO_EXPOSURE)
     save_portfolio(_PORTFOLIO_PATH, state)
     return state
 
@@ -631,17 +632,26 @@ def run(non_interactive: bool = False,
 
     # ── P6 报告 ──────────────────────────────────────────
     logger.info("── P6 报告层 ──")
+    # 精简输出：个股 {TICKER}.md 只留可操作(Buy/Overweight/Sell/Underweight)或持仓票
+    _actionable = {"Buy", "Overweight", "Sell", "Underweight"}
+    detail_tickers = ({t for t, d in decisions.items() if d.rating in _actionable}
+                      | set(portfolio.get("positions", {}).keys()))
     written = write_all_reports(
         decisions=decisions,
         macro=macro,
         date_str=date_str,
         output_dir=output_dir,
+        detail_tickers=detail_tickers,
     )
     for p in written:
         logger.info(f"  已写入: {p}")
 
     pf_path = _write_portfolio_report(portfolio, prices, output_dir, date_str)
     logger.info(f"  已写入: {pf_path}")
+
+    # 精简每日执行单（live 每日照此下单）：判断 + 今日买卖点 + 仓位
+    action_path = write_daily_action_sheet(decisions, macro, portfolio, date_str, output_dir)
+    logger.info(f"  已写入: {action_path}")
 
     logger.info("── 量化评分排行（按 score 降序）──")
     for r in sorted(quant_signals.values(), key=lambda x: x.score, reverse=True):
