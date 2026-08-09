@@ -21,6 +21,9 @@ from data.universe import get_universe
 from signals.quant.factor_engine import compute_quant_signal, QuantSignalResult
 from signals.macro.macro_signal  import compute_macro_signal
 from signals.macro.vix_timing_report import write_vix_timing_report
+from backtest.vix_timing_forward import (
+    log_vix_timing_event, evaluate_vix_timing_pending, write_vix_timing_forward_report,
+)
 from signals.chan.chan_signal    import compute_chan_signal, ChanSignalResult
 from signals.screening           import (
     ScreeningCandidate, screen_for_adds, screen_for_removes,
@@ -443,6 +446,8 @@ def run(non_interactive: bool = False,
     evaluate_factor_pending(pipeline)
     # R7 amihud=压力-beta OOS：评估满 20TD 的横截面因子事件
     evaluate_amihud_pending(pipeline)
+    # R8 大盘择时 OOS：评估满 20TD 的择时事件（前向指数收益）
+    evaluate_vix_timing_pending(pipeline)
 
     logger.info("── universe 扫描（add 候选）──")
     # universe 仅服务 add 候选筛选，失败不应终止每日主流程（R2 调度健壮性）
@@ -621,6 +626,8 @@ def run(non_interactive: bool = False,
     log_breakout_events(prices=prices, date_str=date_str, tickers=set(final_pool))
     # R7 amihud=压力-beta OOS：as-of 记录验证宇宙每票 amihud + 当日 VIX 制度（自载宇宙、独立于扫描池）
     log_amihud_events(date_str=date_str, pipeline=pipeline)
+    # R8 大盘择时 OOS：记录当日 live 触发（SETUP/CONFIRMED/WARNING）+ 指数入场价（绝不回填）
+    log_vix_timing_event(date_str=date_str, swing=macro.swing_timing, index_prices=prices)
 
     # ── P6 报告 ──────────────────────────────────────────
     logger.info("── P6 报告层 ──")
@@ -662,6 +669,7 @@ def run(non_interactive: bool = False,
     logger.info(f"  前向验证报告: {fv_path}")
     write_factor_forward_report(date_str, output_dir)
     write_amihud_forward_report(date_str, output_dir)
+    write_vix_timing_forward_report(date_str, output_dir)
 
     # ── 落盘：池快照 + 变更日志 ──────────────────────────
     save_pool_snapshot(
