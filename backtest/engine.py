@@ -2,10 +2,13 @@
 P7 回测引擎 — 缠论买卖点 walk-forward 回测
 
 信号源：extract_chan_events()（在每根笔完成时触发，无前视偏差）
-模拟规则：
-  - 仅做多（买信号入场，卖信号 / SL / TP 出场）
-  - 止损：入场价 × (1 - SL_PCT)
-  - 止盈：入场价 × (1 + SL_PCT × TP_MULT)  [2:1 R/R]
+模拟规则（**忠于实盘出场**，2026-08-11 改）：
+  - 仅做多（买信号入场，缠论卖点 / 结构止损破位 / 收尾 出场）
+  - 出场一：缠论卖点 s1/s2/s3 → 当日收盘价离场（同实盘 chan_sell）
+  - 出场二：跌破**结构止损**（买点自带：b1/b2=末笔低×0.99、b3=ZG×0.99）→ 结构位成交
+  - **无固定 +14% 止盈**（旧固定 TP 把长期趋势切成碎片，实盘并不这么做）；
+    **无固定 -7% 止损**（改用结构位；结构止损缺失/异常时才回退 _SL_FALLBACK 保护）
+  - 让赢家沿结构奔跑至缠论卖点，亏损按结构位快切——与 portfolio_core 实盘出场同口径
   - 数据不足或无信号 → 返回空结果
 
 预热：前 WARMUP_BARS 根 K 线仅用于结构初始化，不计入回测区间。
@@ -26,8 +29,7 @@ from signals.chan.chan_signal import ChanEvent, extract_chan_events
 # ── 常量 ────────────────────────────────────────────────────────
 WARMUP_BARS = 200    # 预热最少 K 线数（chan 结构 + SMA200）
 MIN_BACKTEST_BARS = 50   # 回测区间最少 K 线数（否则无意义）
-_SL_PCT  = 0.07      # 止损比例（中性制度默认值）
-_TP_MULT = 2.0       # 止盈倍数（2:1 R/R）
+_SL_FALLBACK = 0.07  # 回退止损比例：仅当买点结构止损缺失/异常时启用（正常用结构位）
 
 
 # ── 数据类 ──────────────────────────────────────────────────────
@@ -40,7 +42,7 @@ class Trade:
     entry_price: float
     exit_price:  float
     pnl_pct:     float
-    exit_reason: str    # "sl"|"tp"|"signal"|"eod"
+    exit_reason: str    # "sl"(结构止损破位)|"signal"(缠论卖点)|"eod"(收尾)
     holding_days: int
 
 
@@ -86,29 +88,36 @@ def _make_trade(
                  entry_price, exit_price, pnl, exit_reason, days)
 
 
+def _entry_stop(ev: ChanEvent) -> float:
+    """买点入场的结构止损：优先用事件自带结构位（末笔低/ZG×buffer），
+    缺失或异常（≥入场价，非有效多头止损）时回退固定 _SL_FALLBACK 保护。"""
+    s = ev.stop_loss
+    if s is not None and 0 < s < ev.price:
+        return float(s)
+    return ev.price * (1 - _SL_FALLBACK)
+
+
 def _simulate_trades(df: pd.DataFrame, events: List[ChanEvent]) -> List[Trade]:
     """
-    给定回测区间的 OHLCV 和信号事件列表，模拟多头交易。
-    SL/TP 用区间内日 Low/High 检查（保守假设：SL 在当日 Low 成交）。
+    给定回测区间的 OHLCV 和信号事件列表，模拟多头交易（忠于实盘出场）。
+    出场：缠论卖点(收盘) / 跌破结构止损(结构位成交) / 收尾。无固定止盈。
+    结构止损用区间内日 Low 检查（保守假设：破位在当日 Low 成交）。
     """
     trades: List[Trade] = []
     in_pos     = False
     e_date: Optional[pd.Timestamp] = None
     e_sig  = ""
-    e_price = sl = tp = 0.0
+    e_price = e_stop = 0.0
 
     for ev in events:
         if in_pos:
-            # 检查从上次入场到本事件之间是否触及 SL / TP
+            # 检查从上次入场到本事件之间是否跌破结构止损（无固定止盈）
             window = df[(df.index > e_date) & (df.index <= ev.date)]
             hit_date = hit_price = hit_reason = None
 
             for bar_date, row in window.iterrows():
-                if float(row["Low"]) <= sl:
-                    hit_date, hit_price, hit_reason = bar_date, sl, "sl"
-                    break
-                if float(row["High"]) >= tp:
-                    hit_date, hit_price, hit_reason = bar_date, tp, "tp"
+                if float(row["Low"]) <= e_stop:
+                    hit_date, hit_price, hit_reason = bar_date, e_stop, "sl"
                     break
 
             if hit_date:
@@ -121,8 +130,7 @@ def _simulate_trades(df: pd.DataFrame, events: List[ChanEvent]) -> List[Trade]:
                     e_date  = ev.date
                     e_sig   = ev.signal_type
                     e_price = ev.price
-                    sl = e_price * (1 - _SL_PCT)
-                    tp = e_price * (1 + _SL_PCT * _TP_MULT)
+                    e_stop  = _entry_stop(ev)
 
             elif ev.signal_type.startswith("s") and ev.date > e_date:
                 # F5: 卖出信号 → 以当日收盘出场（同日入场的卖信号忽略，避免 0-PnL 幽灵交易）
@@ -131,15 +139,14 @@ def _simulate_trades(df: pd.DataFrame, events: List[ChanEvent]) -> List[Trade]:
                                           e_price, close_p, "signal"))
                 in_pos = False
 
-            # 连续买入信号 → 保持持仓不动
+            # 连续买入信号 → 保持持仓不动（结构止损不下移，非追踪止损，同实盘）
 
         elif ev.signal_type.startswith("b"):
             in_pos  = True
             e_date  = ev.date
             e_sig   = ev.signal_type
             e_price = ev.price
-            sl = e_price * (1 - _SL_PCT)
-            tp = e_price * (1 + _SL_PCT * _TP_MULT)
+            e_stop  = _entry_stop(ev)
 
     # 收尾：若仍持仓则以最后收盘价出场
     if in_pos and e_date is not None and not df.empty:

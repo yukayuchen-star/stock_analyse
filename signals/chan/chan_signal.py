@@ -100,6 +100,7 @@ class ChanEvent:
     signal_type: str    # "b1"|"b2"|"b3"|"s1"|"s2"|"s3"
     price:       float
     score:       float
+    stop_loss:   Optional[float] = None   # 结构止损价（买点=末笔低/ZG×buffer），回测出场用
 
 
 def extract_chan_events(df: pd.DataFrame) -> List[ChanEvent]:
@@ -167,8 +168,9 @@ def extract_chan_events(df: pd.DataFrame) -> List[ChanEvent]:
         if buy_type != "none":
             if buy_type == "b1":
                 raw_score *= _trend_weight(trend)
-            events.append(ChanEvent(stop_date, buy_type,
-                                    float(sub_close.iloc[-1]), raw_score))
+            entry = float(sub_close.iloc[-1])
+            stop, _ = _calc_stop_and_r(buy_type, entry, last, pivot)
+            events.append(ChanEvent(stop_date, buy_type, entry, raw_score, stop))
             continue
 
         sell_type, raw_score, _ = _detect_sell(
