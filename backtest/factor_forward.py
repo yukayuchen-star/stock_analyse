@@ -169,7 +169,7 @@ def evaluate_pending(pipeline) -> int:
         for row in rows:
             logged_date = row["logged_date"]
             entry_price = row["entry_price"]
-            if pd.Timestamp(logged_date) < first_bar or entry_price <= 0:
+            if pd.Timestamp(logged_date) < first_bar or entry_price is None or entry_price<= 0:
                 continue
             future = df[df.index > logged_date]
             if len(future) < MAX_H:
