@@ -11,6 +11,7 @@ from config.settings   import settings
 from config.stocks     import (
     STOCK_POOL, BENCHMARKS, BUCKETS,
     PORTFOLIO_INITIAL_CAPITAL, PORTFOLIO_LOT_SIZE, MAX_PORTFOLIO_EXPOSURE,
+    PORTFOLIO_TRANCHE_FRACTION,
 )
 from config.pool_manager import (
     PoolChange, append_pool_changes, load_dynamic_pool, load_us_watchlist,
@@ -312,7 +313,8 @@ def _run_portfolio(decisions: Dict[str, StockDecision],
                    prices: Dict, date_str: str) -> dict:
     """按策略信号推进美股模拟组合一天（不改策略，仅记账）。
 
-    买入：Buy/Overweight 且未持仓 → 目标市值 = 建议仓位 × 初始资金。
+    买入：Buy/Overweight → 目标市值 = 建议仓位 × 初始资金，按买点确认**分批**建仓
+    （每个新买点买 1/3 目标，累加至目标；同一买点滞留不重复加），总仓受 60% 上限约束。
     卖出（全部卖出）：评级为 Sell/Underweight，或缠论卖点(s1/s2/s3)经迟滞层
     连续 CONFIRM_DAYS 天确认（chan_sell_confirmed，panic 直通），或跌破结构止损
     （止损不受迟滞约束，风控优先）。成交价 = 信号当日收盘价。
@@ -341,7 +343,8 @@ def _run_portfolio(decisions: Dict[str, StockDecision],
 
     state = load_portfolio(_PORTFOLIO_PATH, PORTFOLIO_INITIAL_CAPITAL)
     update_portfolio(state, date_str, signals, lot_size=PORTFOLIO_LOT_SIZE,
-                     max_exposure_frac=MAX_PORTFOLIO_EXPOSURE)
+                     max_exposure_frac=MAX_PORTFOLIO_EXPOSURE,
+                     tranche_fraction=PORTFOLIO_TRANCHE_FRACTION)
     save_portfolio(_PORTFOLIO_PATH, state)
     return state
 

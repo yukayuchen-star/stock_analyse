@@ -69,12 +69,19 @@ def save_portfolio(path: Path, state: dict) -> None:
 
 
 def update_portfolio(state: dict, date_str: str, signals: List[Signal],
-                     lot_size: int = 1, max_exposure_frac: float = 1.0) -> dict:
+                     lot_size: int = 1, max_exposure_frac: float = 1.0,
+                     tranche_fraction: float = 1.0) -> dict:
     """就地推进组合一天：先卖后买，记快照。返回 state。
 
     max_exposure_frac: 总持仓上限（占当前权益）。新买入受约束使**买入后**持仓市值
     ≤ max_exposure_frac × 权益（权益=现金+持仓市值，先卖后算）；默认 1.0=不设组合级上限
     （A股沿用原行为）。仅约束新买入，不强制卖出因升值漂过上限的赢家（避免无谓换手）。
+
+    tranche_fraction: 分批建仓颗粒度。<1.0 时启用**按买点确认分批**：每个新确认买点
+    只买该票目标仓位的 tranche_fraction（如 1/3），累加至目标；并允许对已持仓票加仓
+    （金字塔式确认加码）。事件驱动、无时间要求——「新买点」由**结构止损位移**判定
+    （新买点结构=末笔低点/ZG 位移→止损变化；同一买点滞留则止损不变，不重复加仓，
+    防评级持续为 Buy 时逐日加满）。默认 1.0=一次买满目标、不对已持仓票加仓（A股原行为）。
 
     幂等保护：若当日已记过快照（history 末条 date==date_str），先回滚当日成交与快照，
     避免同一天重复运行把仓位记重（重算后覆盖当日结果）。
@@ -114,10 +121,12 @@ def update_portfolio(state: dict, date_str: str, signals: List[Signal],
             del positions[code]
 
     # ── 2. 再买（按排名优先，受现金 + 组合级持仓上限约束）──
-    # 同票当日既有卖出信号又有买入评级 → 以卖为准，当日不回补（防卖后即买的洗仓）
+    # 同票当日既有卖出信号又有买入评级 → 以卖为准，当日不回补（防卖后即买的洗仓）。
+    # pyramiding（tranche_fraction<1.0）时允许对已持仓票按新买点加仓；否则只买未持仓票（原行为）。
+    pyramiding = tranche_fraction < 1.0
     buys = sorted([s for s in signals
-                   if s.is_buy and not s.is_sell
-                   and s.code not in positions and s.price > 0],
+                   if s.is_buy and not s.is_sell and s.price > 0
+                   and (pyramiding or s.code not in positions)],
                   key=lambda s: (s.rank if s.rank else 1e9))
 
     # 总持仓上限（占权益）：先卖后按当日价估权益，锁定买入预算上限。买入以现价换股不改权益，
@@ -127,6 +136,7 @@ def update_portfolio(state: dict, date_str: str, signals: List[Signal],
                    for c, pos in positions.items())
     equity_now  = state["cash"] + _deployed_mv()
     exposure_cap = max(0.0, max_exposure_frac) * equity_now   # 持仓市值不得超过此值
+    frac = min(1.0, max(0.0, tranche_fraction)) or 1.0        # 每个买点最多吃目标的这一比例
 
     for s in buys:
         room = exposure_cap - _deployed_mv()      # 距组合上限的剩余可买额度
@@ -135,7 +145,20 @@ def update_portfolio(state: dict, date_str: str, signals: List[Signal],
         target_value = max(0.0, s.position_frac) * initial
         if target_value <= 0:
             continue
-        budget = min(target_value, state["cash"], room)
+        held = positions.get(s.code)
+        # 分批：仅在「新买点」（结构止损较上次加仓发生位移）时加仓；同一买点滞留不重复加。
+        # 止损缺失（≤0）无法判定新旧 → 保守只做首笔、不金字塔加码。
+        if held is not None:
+            same_point = (s.stop_loss <= 0 or held.get("stop_loss", 0) <= 0
+                          or round(s.stop_loss, 3) == round(held["stop_loss"], 3))
+            if same_point:
+                continue
+        current_mv = held["shares"] * s.price if held else 0.0
+        name_room  = target_value - current_mv    # 距该票目标仓的剩余
+        if name_room <= 0:
+            continue
+        tranche_value = frac * target_value        # 单个买点的分批额度
+        budget = min(tranche_value, name_room, state["cash"], room)
         raw_shares = budget / s.price
         shares = int(raw_shares // lot_size) * lot_size if lot_size > 1 else int(raw_shares)
         if shares <= 0:
@@ -144,14 +167,23 @@ def update_portfolio(state: dict, date_str: str, signals: List[Signal],
         if cost > state["cash"]:
             continue
         state["cash"] -= cost
-        positions[s.code] = {
-            "shares": shares, "cost_price": round(s.price, 3),
-            "buy_date": date_str, "stop_loss": round(s.stop_loss, 3),
-        }
+        if held:
+            new_sh = held["shares"] + shares
+            held["cost_price"] = round(
+                (held["shares"] * held["cost_price"] + shares * s.price) / new_sh, 3)
+            held["shares"]    = new_sh
+            held["stop_loss"] = round(s.stop_loss, 3)   # 跟随最新结构止损
+            reason = f"加仓(新买点) 目标{s.position_frac:.0%}"
+        else:
+            positions[s.code] = {
+                "shares": shares, "cost_price": round(s.price, 3),
+                "buy_date": date_str, "stop_loss": round(s.stop_loss, 3),
+            }
+            reason = f"策略买点 仓位{s.position_frac:.0%}"
         state["trades"].append({
             "date": date_str, "code": s.code, "action": "买入",
             "price": round(s.price, 3), "shares": shares, "pnl": 0.0,
-            "reason": f"策略买点 仓位{s.position_frac:.0%}",
+            "reason": reason,
         })
 
     # ── 3. 记快照 ──
