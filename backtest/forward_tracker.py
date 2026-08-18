@@ -187,6 +187,13 @@ def evaluate_pending(pipeline) -> int:
             entry_price = row["entry_price"]
             stop_loss   = row["stop_loss"] or 0.0
 
+            # 入场价缺失/非法的历史记录无法评估，跳过（同 factor_forward None guard）
+            if entry_price is None or entry_price <= 0:
+                logger.warning(
+                    f"[ForwardTracker] {ticker} {logged_date} entry_price 非法"
+                    f"({entry_price})，跳过")
+                continue
+
             # 信号日须落在价格窗口内：否则 df.index>logged_date 会把整段历史
             # 当作"未来"，iloc[4] 取到错误的出场 bar，产生虚假盈亏。
             if pd.Timestamp(logged_date) < first_bar:
@@ -270,6 +277,9 @@ def build_report(date_str: str) -> str:
         WHERE fs.logged_date >= ?
         ORDER BY fs.logged_date DESC
     """, (cutoff,)).fetchall()
+    # 历史遗留：早期记录可能带 pnl_pct=None（entry_price 缺失时评估落库），
+    # 无法参与任何胜率/盈亏聚合，源头一次性剔除（同 factor_forward None guard）。
+    rows = [r for r in rows if r["pnl_pct"] is not None]
 
     pending_count = c.execute("""
         SELECT COUNT(*) FROM forward_signals fs
@@ -305,7 +315,11 @@ def build_report(date_str: str) -> str:
         )
         return "\n".join(lines)
 
-    pnls   = [r["pnl_pct"] for r in rows]
+    # pnl_pct 可为 None（到期价缺失的信号），剔除后再聚合（同 factor_forward None guard）
+    pnls   = [r["pnl_pct"] for r in rows if r["pnl_pct"] is not None]
+    if not pnls:
+        lines.append("> 已评估信号均无有效 pnl（到期价缺失），数据积累中…\n")
+        return "\n".join(lines)
     wins   = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p <= 0]
 

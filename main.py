@@ -11,7 +11,7 @@ from config.settings   import settings
 from config.stocks     import (
     STOCK_POOL, BENCHMARKS, BUCKETS,
     PORTFOLIO_INITIAL_CAPITAL, PORTFOLIO_LOT_SIZE, MAX_PORTFOLIO_EXPOSURE,
-    PORTFOLIO_TRANCHE_FRACTION,
+    PORTFOLIO_TRANCHE_FRACTION, CORE_HOLDINGS,
 )
 from config.pool_manager import (
     PoolChange, append_pool_changes, load_dynamic_pool, load_us_watchlist,
@@ -314,7 +314,9 @@ def _run_portfolio(decisions: Dict[str, StockDecision],
     """按策略信号推进美股模拟组合一天（不改策略，仅记账）。
 
     买入：Buy/Overweight → 目标市值 = 建议仓位 × 初始资金，按买点确认**分批**建仓
-    （每个新买点买 1/3 目标，累加至目标；同一买点滞留不重复加），总仓受 60% 上限约束。
+    （每个新买点买 1/3 目标，累加至目标；同一买点滞留不重复加），总仓受 30% 上限约束
+    （R9 双 sleeve：paper 组合=仅战术 sleeve；核心名 CORE_HOLDINGS 不进买入候选，
+    分析照跑供核心择时复用，防同名双重敞口——卖出信号仍生效以清历史遗留仓）。
     卖出（全部卖出）：评级为 Sell/Underweight，或缠论卖点(s1/s2/s3)经迟滞层
     连续 CONFIRM_DAYS 天确认（chan_sell_confirmed，panic 直通），或跌破结构止损
     （止损不受迟滞约束，风控优先）。成交价 = 信号当日收盘价。
@@ -323,7 +325,8 @@ def _run_portfolio(decisions: Dict[str, StockDecision],
     _SELL = {"Sell", "Underweight"}
 
     # 当日买入排名（final_score 降序）→ 现金不足时优先靠前的票
-    buys_sorted = sorted([d for d in decisions.values() if d.rating in _BUY],
+    buys_sorted = sorted([d for d in decisions.values()
+                          if d.rating in _BUY and d.ticker not in CORE_HOLDINGS],
                          key=lambda d: d.final_score, reverse=True)
     rank_of = {d.ticker: i + 1 for i, d in enumerate(buys_sorted)}
 
@@ -334,7 +337,7 @@ def _run_portfolio(decisions: Dict[str, StockDecision],
         signals.append(Signal(
             code=ticker,
             price=price,
-            is_buy=(d.rating in _BUY),
+            is_buy=(d.rating in _BUY and ticker not in CORE_HOLDINGS),
             is_sell=(d.rating in _SELL or d.chan_sell_confirmed),
             position_frac=d.suggested_position,
             stop_loss=d.stop_loss or 0.0,

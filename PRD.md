@@ -806,6 +806,195 @@ R7 用三条互不相同的路攻这个 t<2，均复用 R6.1 `factor_lab` 门；
 **诚实边界**：样本内 n 小（恐慌 episode 稀少、CONFIRMED n=2）→ 待挂 R5.6 式无回填 OOS 累积；右端确认致逃顶天然滞后数日；
 减仓非做空（守保守单边）；门控非造信号。
 
+### R9 — 双 Sleeve 组合架构 + 核心持仓基本面研究框架 Two-Sleeve Portfolio & Core-Holdings Fundamental Research（2026-08-18 立项）
+
+#### R9.0 立项背景与范围决策 Background & Scope
+
+**来源**：用户将美股组合正式重构为**双 Sleeve** 架构，并要求为长持核心仓建立一套**基于官方公司
+披露（SEC filings）的深度基本面研究框架**，覆盖买卖择时与目标价位，产出每日可执行的分析结论。
+
+| Sleeve | 资金 | 标的 | 引擎 | 出场 |
+|--------|------|------|------|------|
+| **Core 核心** | **70%** | NVDA / AAPL / GOOGL / MSFT / AMZN / META + QQQ | 基本面 + 估值 + 择时（本 R9 新建） | 仅 thesis 破坏 / 极端高估减仓，否则 10+ 年长持 |
+| **Tactical 战术** | **30%** | TSLA / VRT / NBIS / MU / AMD…（策略筛选） | 现有缠论 × 宏观 × 量化 swing 引擎 | 缠论卖点 / 结构止损（现有口径，不变） |
+
+现状：Core 仓已建至目标 70% 的 **~20%**（现建仓约占总资金 14%），用户意图**持续优化入场、
+摊低平均成本，直至补满 70%**。
+
+**✅ 三项参数同日用户确认并落地**：`BASE_FLOOR_FRAC=0.70`、tactical cap
+`MAX_PORTFOLIO_EXPOSURE 0.60→0.30`、核心名从 tactical paper 买入候选排除
+（`config/stocks.py` + `main.py:_run_portfolio`）。
+
+**两项锁定决策（2026-08-18 AskUserQuestion；决策 1 同日经用户补充修订）**：
+1. **核心出场脊柱 = 「底仓长持 + 增强层高抛低吸」双层结构**（选项 a + 用户补充）。
+   - **底仓 Base（不可波段）**：仅两类触发才动——①**thesis 破坏**（营收/EPS 增速转负、毛利
+     趋势下行、竞争地位丧失、8-K 重大治理/会计红旗）；②**极端高估** `price > fair_value_ceiling`
+     （如 P/E > 历史 90 分位）→ 减 1/3（非清仓）。否则**穿越所有回撤长持（10+ 年）**。
+   - **增强层 Enhancement（可高抛低吸）**：用户补充——每名维持一定底仓后，其**之上的部分**可
+     围绕公允价带高抛低吸降低成本，须策略化 + 综合决策（规则见 R9.3 增强层）。
+   - swing<hold 教训（[[insight_backtest_exit_faithful]]）由**底仓下限收容**：波段仅发生在增强层
+     ——即使高抛后价格一路上行（卖飞），底仓仍完整在场捕获趋势，波段踏空的结构性代价被限幅。
+2. **产出定位 = 每日「决策支持」分析报告**（选项 a），由**可复用 skill** 生成，用户读后**手动
+   在真金账户执行**。→ **零 `portfolio_core` / 组合引擎改动**；核心仓不进 paper 记账。
+
+**为何需要 skill 而非纯 Python**：判断「8-K 是否 material」「thesis 是否仍成立」「长期增长潜力」
+= 定性 LLM 推理，纯 Python 无法胜任。分工明确：**Python 取数 + 算估值指标（结构化输入）→
+skill（LLM）读披露原文 + 推理 → 每日深度结论**。这正是「纯 Python 不能满足→建 skill」的判据。
+
+**边界纪律**：① 不碰缠论 55% 本体；② 核心框架**仅 live/advisory，天然无回测**——基本面无干净
+PIT 估值历史（XBRL 有 PIT 财务但 forward 估值带需长期分析师预期序列，yfinance 无 PIT forward），
+故**不 overclaim「回测验证」**，价值在结构化纪律而非统计 edge（承接 R4.4「基本面禁入回测」）；
+③ 禁爬虫但**可程序化官方 API**——SEC EDGAR 是官方文档化免费 JSON 端点，与 yfinance/FRED/Finnhub
+同类（承接 R5/R6 数据纪律）。
+
+#### R9.1 组合双 Sleeve 预算框架 Capital Allocation
+
+- 背景：用户组合 = 70% 核心长持 + 30% 战术；现系统是**单 sleeve ≤60% 上限**（上线 go-live guard）。
+- 现状：`config/stocks.py:MAX_PORTFOLIO_EXPOSURE=0.60`（单池）；`portfolio_core` 单池记账；
+  paper 组合 `us_portfolio.json` 当前模拟的是「全策略 ≤60%」，与新双 sleeve 语义不再对齐。
+- 需求（**文档/配置层，非引擎逻辑改动**——出场决策已定核心为 advisory）：
+  1. 概念上分两预算池：**Core 70%（手动，不进 paper 引擎）** + **Tactical 30%（现有引擎）**。
+  2. **paper 组合语义收敛为「仅战术 sleeve」**：建议 `MAX_PORTFOLIO_EXPOSURE 0.60 → 0.30`
+     （tactical 上限占总资金 30%）。⚠️ 这是 **live 行为变更**（改的是传入常量，非 `portfolio_core`
+     逻辑，仍守「零引擎改动」），**须用户复核确认**后才改；PRD 阶段只提案。
+  3. **VIX 门控的双向取向**（关键洞察，写入框架）：Tactical 仍受 VIX 四档收缩仓位；**Core 相反**
+     ——高 VIX（25+）市场恐慌回撤时**加速累积**（长持者的恐慌是礼物，摊低成本的黄金窗口）。
+     两 sleeve 对同一 VIX 信号**方向相反**，这是双 sleeve 架构的核心价值之一。
+  4. **核心台账（真金记录，skill 一切成本类结论的锚）**：新 `output/core_ledger.json`——每名逐笔
+     真实成交（date / price / shares / 底仓|增强层标记，用户手动维护或经 skill 辅助追加），由此算
+     平均成本、20%→70% 建仓进度、增强层高抛低吸配对与「本轮节省」。**无台账则折溢价、摊低
+     成本、降成本核算全部无锚**——这是 advisory 模式下唯一必须用户维护的状态文件。
+  5. **双 sleeve 标的重叠治理**：`CORE_HOLDINGS`（NVDA/AAPL/GOOGL/MSFT/AMZN/META/QQQ）从
+     tactical paper 组合的**买入候选中排除**（三引擎分析照跑——核心择时要复用缠论买点，但 30%
+     战术 sleeve 不重复持有核心名，防同名双重敞口 + 两套矛盾指令）；TSLA 属战术池不受此限。
+- 验收：报告清晰呈现两 sleeve 状态（Core 预算 20%→70% 剩余额度表 + Tactical 现状）；tactical
+  cap 变更如落地则单测「30% 上限」（仿现有 60% 单测）；核心名不出现在 tactical paper 买入；
+  A 股 `portfolio_core` 默认参数行为零变化。
+- 涉及：`config/stocks.py`（`CORE_HOLDINGS` / `TACTICAL_POOL` 常量 + tactical cap 注释）、
+  `output/core_ledger.json`（新，用户维护）、`main.py`（tactical 买入候选排除核心名）、报告层
+  （双 sleeve 视图）；**不改 `portfolio_core` 买卖逻辑**。
+
+#### R9.2 核心持仓基本面数据层 SEC EDGAR + 估值输入 Data Layer
+
+- 背景：核心框架需「官方公司公告与披露」= **SEC EDGAR**（10-K/10-Q/8-K + XBRL 财务事实）+
+  市场估值输入（yfinance forward 估计 / multiples / 分析师目标价）。
+- 现状：系统**无 EDGAR/filings 摄入**；`signals/quant/fundamental.py` 仅用 yfinance `.info` 快照
+  （14 字段，live-only）。
+- 需求：新 `data/edgar_source.py`——**程序化官方 API**（`data.sec.gov`，免费，须带 `User-Agent`）：
+  - **CIK 映射**：`www.sec.gov/files/company_tickers.json`（官方单文件）→ ticker→CIK。
+  - **submissions API**：`data.sec.gov/submissions/CIK{cik}.json` → 最近 filings 列表（form type /
+    date / accession / 文档 URL），筛 **8-K（材料事件）/ 10-K / 10-Q**。
+  - **companyfacts API**：`data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json` → XBRL 财务事实序列
+    （Revenues / NetIncome / EPS / GrossProfit…）**带报告 PIT 日期**（真 PIT，异于 yfinance 快照）。
+  - **缓存 + 新鲜度 + 回退**：仿 `data/fred_source.py`（SQLiteCache / retry / `STALE_LIMIT_DAYS` /
+    `staleness()→"EDGAR_STALE:...(<age>d)"`）；守 SEC **≤10 req/s** 限速；本地文件离线回退。
+  - ⚠️ **合规**：全部官方文档化 JSON 端点 GET（**非 HTML 抓取、非跨页遍历**），与 FRED/Finnhub 同类。
+- 特例 **QQQ（ETF 无公司 filings）**：改用**指数级估值代理**——⚠️ 指数 forward P/E **历史序列**
+  无免费官方源（须付费分析师预期历史），诚实降级为可自建的代理组合：①6 只核心成分股估值带的
+  市值加权均值（成分重叠度高）；②QQQ 价格对 200DMA 乖离的历史分位；③当前 Nasdaq-100 P/E
+  快照仅作交叉验证。**无 thesis 破坏减仓**（指数不会「thesis 坏掉」）——只走估值带择时 + 极端高估 trim。
+- 验收：取到 6 只核心个股最近 filings + XBRL 财务序列 + QQQ 指数估值代理；新鲜度标记；离线回退可用。
+- 涉及：`data/edgar_source.py`（新）、`config`（`EDGAR_USER_AGENT` / CIK 缓存路径常量）。
+- **✅ 落地（2026-08-18）+ 连通性实测**：本机网络 `sec.gov`/`data.sec.gov` **TLS 握手即被重置**
+  （curl/LibreSSL 与 Python/OpenSSL 一致，沙箱内外一致；与 R6.3 FTD 同因——SEC 对部分海外 IP 段
+  reset，网络级硬约束）→ `EdgarSource` 实现为 **EDGAR 优先 + yfinance 回退链**：每进程探测一次
+  （8s 超时），不可达即用 `Ticker.sec_filings`（EDGAR 元数据镜像，实测 NVDA 78 条含当日 8-K）+
+  `income_stmt/quarterly_income_stmt`（5 年年报/5 季季报含 Diluted EPS），降级标记
+  `EDGAR_UNREACHABLE`。Yahoo 怪癖：GOOGL 基本面/filings 挂 GOOG → `_YF_ALIAS` 空结果重试。
+  未来换网/VPN 后官方 XBRL（更长历史+真 PIT filing 日期）自动升级，代码已备。
+
+#### R9.3 公允价与择时框架 Valuation & Entry/Exit Timing
+
+**每只核心股产出三段结论：公允价区间 → 折溢价 → 择时建议（加/等/减 + 价位）。**
+
+- **公允价区间 `[floor, mid, ceiling]`（多法三角，非单点）**：
+  - **P/E 带（主口径 = trailing）**：**历史 trailing P/E 分位**（XBRL 历史 EPS × 历史价格，可 PIT
+    重建完整序列）取 {25/50/75 分位} × 当前 EPS → 价格带；当前 forward P/E（yfinance 快照）仅作
+    交叉验证——⚠️ **历史 forward P/E 序列无免费官方源**（须分析师预期历史，付费数据），带的
+    分位基准诚实采用 trailing 口径，不假装有 forward 历史。
+  - **PEG-implied**：fair P/E ≈ 增长率（PEG=1~1.5 锚）→ 隐含价。
+  - **DCF（粗略可选）**：FCF × 增长 × 折现，作数量级交叉验证。
+  - **分析师目标价共识带**（yfinance `targetLow/Mean/High`）——**交叉验证用，非依赖**（卖方有多头偏差）。
+  - → 当前价 vs 带 = **折价 / 溢价 %**。
+- **买入/累积择时（tranche 触发，hybrid——服务「摊低平均成本至 70%」）**：
+  - **估值门**：`price ≤ mid`（折价）才考虑加仓；`≤ floor`（深折价）加大 tranche。
+  - **技术助攻**：复用现有缠论买点（b1/b2/b3）+ 回踩 200DMA + 结构支撑 → 择时扳机（**只读复用，
+    不改缠论**）。
+  - **宏观加速**：高 VIX 恐慌回撤 → Core 加速累积（R9.1 双向取向）。
+  - **成本纪律**：每次加仓后算新平均成本 + 距目标 70% 剩余额度 + 建议 tranche 大小。
+- **底仓减仓择时（锁定决策 1，仅两触发）**：① **thesis 破坏**（8-K 红旗 / XBRL 财务恶化 / 竞争
+  地位，skill 定性判）→ 减 1/3 或退出该名；② **极端高估** `price > ceiling`（P/E > 历史 90 分位，
+  trailing 口径）→ 减 1/3（非清仓）。**否则底仓穿越回撤长持**。
+- **增强层高抛低吸（2026-08-18 用户补充；维持底仓后的成本优化波段）**：
+  - **层量界定**：每名 `底仓下限 = BASE_FLOOR_FRAC × 已建仓位`（**提案默认 0.7，待用户确认**）；
+    增强层 = 已建仓位 − 底仓下限；任何高抛卖出**不得使持仓跌破底仓下限**（硬约束）。
+  - **高抛触发（综合决策：估值 × 结构 × 宏观三票制，估值必要 + 结构确认）**：估值条件
+    `price ≥ mid 上方偏 ceiling`（溢价区）**且** 结构确认（缠论 s1/s2 顶背驰或涨速衰竭）。
+    这正是 trend-rider 否决实验证据的**正确复用**（[[insight_backtest_exit_faithful]]）：上涨制度中
+    s1/s2 大多是真局部顶——拿它给底仓卖出是错（swing<hold），拿它给**增强层高抛择时**是对的。
+    VIX calm + 高溢价 → 加权更倾向卖。
+  - **低吸回补**：价格回落至 `mid` 以下 / 缠论 b2/b3 买点 / 高 VIX 恐慌回撤——与核心累积择时
+    **同一套触发**（复用 R9.3 买入框架，不另造一套）。
+  - **降成本会计纪律**：只有 `回补价 < 高抛价` 才真正降低成本；每轮配对完成后在 `core_ledger.json`
+    记「本轮节省 = (高抛价 − 回补价) × 股数」；**若高抛后价格不回**——接受增强层踏空（底仓仍
+    在场），**禁止追高回补**（回补价 ≥ 高抛价即放弃本轮，等下一轮溢价窗口）。
+  - **与「摊低成本至 70%」协同**：高抛所得现金优先用于回补 / 下一轮累积 tranche，服务补满 70%
+    总目标，增强层非独立盈利中心。
+- 验收：每只核心股产出公允价带 + 当前折溢价 + 明确择时建议 + 目标价位；增强层建议须同时给出
+  底仓下限校验（卖多少股不破线）与配对状态（待回补/已配对/已放弃）；每个触发**可回溯到具体
+  披露/指标**（非黑箱）。
+- 涉及：估值计算（纯 Python，新 `signals/fundamental/valuation.py` 或并入 skill 预取脚本）+ 定性
+  判断（skill）。
+
+#### R9.4 每日核心持仓研究 Skill Reusable Core-Holdings Research Skill
+
+- 背景：thesis 评估 / 材料事件判断 / 长期增长 = LLM 定性，纯 Python 不可；用户要**可复用 skill**
+  出每日深度结论。
+- 现状：项目仅有 `graphify`（global）等工程类 skill，**无投研 skill**。
+- 需求：新 skill `.claude/skills/core-holdings-research/SKILL.md`（`/core-research` 触发）：
+  - **输入**：Python 预取的结构化包 `output/{date}/core_inputs.json`——最近 filings 元数据 + 原文
+    URL + XBRL 财务序列 + 估值带指标 + 缠论/技术状态 + **核心台账**（`core_ledger.json`：平均成本 /
+    建仓进度 / 增强层配对状态）+ **财报日历**（Finnhub 既有源：临近财报的核心名，加/减仓建议须
+    标注财报风险窗口——财报前 N 日的 tranche 建议默认降半或推迟，防事件跳空）。
+  - **流程**（逐核心股）：①`WebFetch` 官方 filing URL 读 8-K/10-Q 原文，判材料事件；②评 XBRL
+    财务趋势；③判 thesis 是否成立；④对齐估值带算折溢价；⑤给择时结论（加仓 X% / 等待 / 减仓 +
+    理由 + 目标价）。
+  - **输出**：`output/{date}/核心持仓研究.md`——每只核心股含**五要素**（披露摘要 / 材料事件评估 /
+    公允价区间 / 当前折溢价 / 今日择时建议 + 目标价位，择时建议区分**底仓累积 vs 增强层高抛低吸**
+    两层）+ 组合层 Core 预算进度（20%→70%）+ 增强层配对台账摘要（累计节省）。
+  - **可复用**：核心池从 `config` 读（参数化 ticker 列表），输出结构模板化；可 `/core-research` 手动跑
+    或 `main.py` 之后串接。
+- 验收：跑一次产出 6 只个股 + QQQ 完整研究页，每只五要素齐全、结论可操作（明确加/等/减 + 价位）；
+  无数据时如实标注降级不臆造。
+- 涉及：skill 文件（新）、`config`（`CORE_HOLDINGS` 池）、预取脚本（`main.py` 或独立入口生成
+  `core_inputs.json`）。
+
+#### R9.5 集成与每日流程 Integration & Daily Flow
+
+- **Python 侧**：`main.py`（或独立入口）预取 `core_inputs.json`（EDGAR filings + XBRL + 估值 + 技术）。
+- **skill 侧**：读 json → LLM 深度研究 → `核心持仓研究.md`（advisory，手动执行）。
+- **Tactical 侧**：现有 `main.py` 引擎照跑（cap 建议 0.30，待用户确认）。
+- **报告层**：双 sleeve 视图——Core 预算进度 + Tactical 现状；`今日操作.md` 保留为 tactical 执行单。
+
+#### R9.6 诚实边界 Honest Bounds（反 overclaim，必读）
+
+- **核心框架仅 advisory / live，无回测**——基本面无干净 PIT 估值历史（R4.4 既定）；**禁止宣称
+  「回测验证/胜率提升」**，这是**定性纪律框架**，价值在结构化决策与风控，非统计 edge。
+- **公允价是区间非点估**；分析师目标价有卖方多头偏差（交叉验证，非依赖）。
+- **8-K 材料性判断是 LLM 定性，会错**——报告须留可回溯链接供人工复核，不黑箱。
+- **swing<hold 教训以「底仓下限」收容**（[[insight_backtest_exit_faithful]]）：波段仅限增强层，
+  底仓穿越回撤长持——高抛踏空时底仓完整在场，波段的结构性代价被限幅；「回补价 ≥ 高抛价即
+  放弃本轮」防追高。⚠️ **增强层高抛低吸未经回测验证**（无 PIT 估值带历史，且实测波段在长牛股
+  上结构性跑输死拿）——定位是**纪律化的成本优化**，预期贡献为正但有限，不宣称统计 edge。
+- **税务/洗售不建模**：真金账户高抛低吸的税务后果（短期资本利得、wash-sale 等）由用户自行评估，
+  框架只做投资纪律，不做税务优化。
+- **QQQ 无公司 filings**：用指数级估值代理 + 无 thesis 减仓——特殊处理，不套用个股框架。
+- **SEC EDGAR** 官方免费 API：守 ≤10 req/s + `User-Agent`；全 JSON 端点 GET，非爬虫。
+- **禁改缠论 55% 本体**；Tactical 仍是现有引擎，本 R9 不触碰其信号逻辑。
+- **tactical cap 0.60→0.30 是 live 行为变更**，PRD 仅提案，落地前须用户明确确认。
+
+---
+
 ### 5.1 优先级与依赖
 
 ```
@@ -818,9 +1007,13 @@ R5.1 R5.2 ──────────────► 第五批（2026-07-20 �
 R5.4 ───────────────────►   R5.3 缓议待 R5.1/R5.2 结论）
 R6.1 ───────────────────► 第六批（2026-08-02 立项；R6.1 验证门是 R6.2/R6.3 merge 前置，先建）
 R6.2 R6.3 R6.4 ─────────►   R6.2/R6.3 过门→R6.5 集成；R6.7 OOS 对 survivor 闭环
+R9.1 ───────────────────► 第九批（2026-08-18 立项；双 sleeve 架构，PRD-first 零码改动待确认）
+R9.2 ───────────────────►   R9.2 EDGAR 数据层是 R9.3 估值/R9.4 skill 前置，先建
+R9.3 R9.4 R9.5 ─────────►   R9.3 估值带→R9.4 skill 消费→R9.5 集成；核心仓 advisory 不进 paper 引擎
 ```
 
 ---
+
 
 ## 6. 非功能需求 Non-Functional Requirements
 
@@ -850,6 +1043,7 @@ R6.2 R6.3 R6.4 ─────────►   R6.2/R6.3 过门→R6.5 集成�
 | R4.x | 背离票报告权重显示 70/20/10；评级迁移矩阵人工签核 |
 | R5.x | 因子级 as-of 回测对比报告（纯价格 vs 量能门：胜率/期望/信号数/假信号率）；无 Volume 回退行为不变断言；`echo \| python main.py --non-interactive` 端到端退出码 0 |
 | R6.x | `factor_lab._selfcheck` 向量化≡实盘绿；每因子 IC/IR + 分位单调 + 跨年稳定 + 相关性剪枝报告（过门才 merge、不过如实记录）；short/structure loader 缺数据中性回退 + `degraded` 标记；集成后 quant 权重和=1、未触发票 final_score 无漂移；`echo \| python main.py --non-interactive` 端到端退出码 0 |
+| R9.x | EDGAR source 单测（UA 头断言 / 限速 / 缓存回退 / 6 核心名 filings+XBRL 取到）；估值带对每名产出 [floor,mid,ceiling] 且 trailing 口径可复现；skill 跑一次产出 6+QQQ 完整研究页（五要素齐全、底仓/增强层建议分层、底仓下限校验在场）；核心名不出现在 tactical paper 买入；A 股与现有美股 tactical 行为零回归 |
 
 ### 7.2 全局回归基线（每批改动后必跑）
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from config.stocks               import MAX_PORTFOLIO_EXPOSURE
 from signals.chan.chan_signal     import ChanSignalResult
 from signals.quant.factor_engine import QuantSignalResult
 from signals.macro.macro_signal  import MacroSignalResult
@@ -374,7 +375,7 @@ def _daily_action_sheet(
     state:     dict,
     date_str:  str,
 ) -> str:
-    """精简执行单：①今日判断 ②今日买卖点 ③当前仓位。数据取自组合 state（已按 60% 上限成交的**真实**结果）。"""
+    """精简执行单：①今日判断 ②今日买卖点 ③当前仓位。数据取自组合 state（已按 MAX_PORTFOLIO_EXPOSURE 上限成交的**真实**结果）。"""
     hist = state.get("history", [])
     cur = hist[-1] if hist else None
     positions = state.get("positions", {})
@@ -389,7 +390,7 @@ def _daily_action_sheet(
           f"- 大盘环境：VIX **{macro.vix_level:.1f}**[{regime}]　仓位上限(VIX门) {macro.position_limit:.0%}　"
           f"宏观得分 {macro.score:+.2f}"]
     sw = getattr(macro, "swing_timing", None)
-    stance = "常规：按买卖点执行，总仓≤60%。"
+    stance = f"常规：按买卖点执行，总仓≤{MAX_PORTFOLIO_EXPOSURE:.0%}（战术 sleeve）。"
     if sw is not None:
         if sw.top_state == "WARNING":
             stance = "🔴 **逃顶预警：只减不加**，对存量止盈/收紧止损，新仓上限已自动折半。"
@@ -410,7 +411,7 @@ def _daily_action_sheet(
     sells = [t for t in trades_today if t["action"] == "卖出"]
     buys  = [t for t in trades_today if t["action"] == "买入"]
     if not sells and not buys:
-        L += ["> 今日无成交（无满足条件的买卖点，或已被 60% 仓位上限/现金挡下——见文末候补）。", ""]
+        L += ["> 今日无成交（无满足条件的买卖点，或已被仓位上限/现金挡下——见文末候补）。", ""]
     if sells:
         L += ["### 🔺 卖出", "",
               "| 代码 | 卖价 | 股数 | 盈亏 | 原因 |", "|--|--|--|--|--|"]
@@ -443,7 +444,7 @@ def _daily_action_sheet(
         mv, cash, equity = cur["market_value"], cur["cash"], cur["equity"]
         L += [f"- 总权益 **${equity:,.0f}**　持仓 **${mv:,.0f}（{mv/equity:.0%}）**　"
               f"现金 ${cash:,.0f}（{cash/equity:.0%}）　累计盈亏 {cur['total_pnl_pct']:+.2%}",
-              f"- 持仓上限 60% → 剩余可加仓额度约 **${max(0.0, 0.60*equity - mv):,.0f}**", ""]
+              f"- 持仓上限 {MAX_PORTFOLIO_EXPOSURE:.0%}（战术 sleeve）→ 剩余可加仓额度约 **${max(0.0, MAX_PORTFOLIO_EXPOSURE*equity - mv):,.0f}**", ""]
     if positions:
         L += ["| 代码 | 买入价 | 现价 | 浮盈 | 股数 | 市值 | 止损 |", "|--|--|--|--|--|--|--|"]
         price_now = {c: (float(decisions[c].current_price)
@@ -466,7 +467,7 @@ def _daily_action_sheet(
               if d.rating in ("Buy", "Overweight") and d.suggested_position > 0
               and d.ticker not in held and d.ticker not in bought_today]
     if queued:
-        L += ["## 候补（评级达标，暂被 60% 上限/现金挡下）", ""]
+        L += ["## 候补（评级达标，暂被仓位上限/现金挡下）", ""]
         for d in queued:
             bp = (d.chan_signal.buy_point_type.upper()
                   if d.chan_signal and d.chan_signal.buy_point_type else "—")
