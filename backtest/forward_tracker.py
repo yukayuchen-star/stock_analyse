@@ -187,11 +187,19 @@ def evaluate_pending(pipeline) -> int:
             entry_price = row["entry_price"]
             stop_loss   = row["stop_loss"] or 0.0
 
-            # 入场价缺失/非法的历史记录无法评估，跳过（同 factor_forward None guard）
+            # 入场价缺失/非法的历史记录无法评估（同 factor_forward None guard）。
+            # 写入 INVALID 哨兵而非纯 continue：否则它永远留在 pending 集里，
+            # 每日重跑重复告警，并长期虚增报告里的「待评估（持仓中）」计数。
             if entry_price is None or entry_price <= 0:
                 logger.warning(
                     f"[ForwardTracker] {ticker} {logged_date} entry_price 非法"
-                    f"({entry_price})，跳过")
+                    f"({entry_price})，标记 INVALID 退出待评估集")
+                c.execute("""
+                    INSERT OR REPLACE INTO forward_outcomes
+                    (signal_id, eval_date, hold_days, exit_price, pnl_pct,
+                     hit_stop, stop_hit_date, outcome)
+                    VALUES (?,?,?,?,?,?,?,?)
+                """, (row["id"], today_str, None, None, None, 0, None, "INVALID"))
                 continue
 
             # 信号日须落在价格窗口内：否则 df.index>logged_date 会把整段历史
@@ -277,8 +285,9 @@ def build_report(date_str: str) -> str:
         WHERE fs.logged_date >= ?
         ORDER BY fs.logged_date DESC
     """, (cutoff,)).fetchall()
-    # 历史遗留：早期记录可能带 pnl_pct=None（entry_price 缺失时评估落库），
-    # 无法参与任何胜率/盈亏聚合，源头一次性剔除（同 factor_forward None guard）。
+    # pnl_pct=None 的两类：历史遗留记录，以及 entry_price 非法而落 INVALID 哨兵的记录。
+    # 二者都无法参与胜率/盈亏聚合，源头一次性剔除（同 factor_forward None guard）。
+    invalid_count = sum(1 for r in rows if r["pnl_pct"] is None)
     rows = [r for r in rows if r["pnl_pct"] is not None]
 
     pending_count = c.execute("""
@@ -306,6 +315,7 @@ def build_report(date_str: str) -> str:
         f"| 窗口内记录信号 | {total_logged} |",
         f"| 已评估 | {len(rows)} |",
         f"| 待评估（持仓中） | {pending_count} |",
+    ] + ([f"| 不可评估（入场价缺失） | {invalid_count} |"] if invalid_count else []) + [
         "",
     ]
 

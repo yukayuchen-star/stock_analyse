@@ -29,9 +29,11 @@ from signals.valuation import _last_close, qqq_valuation, valuation_band
 _PRICE_DAYS = 800   # 与实盘管线同窗口（缠论需 ≥200 根，推荐 550+ TD）
 
 _LEDGER_TEMPLATE = {
-    "_readme": "真金核心台账：每笔成交手动追加进对应票 fills（layer: base=底仓|enh=增强层）；"
-               "total_capital 填总资金美元数（核心目标 = 70% × 此值）；"
-               "enhancement_rounds 记高抛低吸配对（status: open|paired|abandoned）。",
+    "_readme": "真金核心台账：每笔成交按时间顺序追加进对应票 fills（layer: base=底仓|enh=增强层）；"
+               "买入 shares 填正数、卖出填负数；price 为 null 或 ≤0 = 成本待补（只计股数，"
+               "所有成本类结论会被跳过）；total_capital 填总资金美元数（核心目标 = 70% × 此值）；"
+               "enhancement_rounds 记高抛低吸配对（status: open|paired|abandoned）。"
+               "底仓下限锚定历史最高已建股数，不随高抛回落。",
     "total_capital": None,
     "positions": {t: {"fills": []} for t in CORE_HOLDINGS},
     "enhancement_rounds": [],
@@ -50,20 +52,58 @@ def _load_ledger() -> dict:
 
 
 def _ledger_stats(ledger: dict, ticker: str, price: float | None) -> dict:
+    """派生台账口径。fills 按列表顺序视作时间序（date 可空）；shares>0=买入、<0=卖出。
+
+    三条纪律：
+    ① **移动加权成本法**：卖出按当时均价等比扣减 invested，`avg_cost` 不因高抛而漂移
+       （否则「摊低平均成本」这个核心目标的度量本身就被卖出污染）。
+    ② **底仓下限锚定历史最高已建股数** built_peak，不随高抛回落——若按当前股数重算，
+       每轮高抛后下限都会再降一档（0.7ⁿ），双层结构会被合法地蚕食至零。
+    ③ price 为 None 或 ≤0 = **成本待补**：只计股数不计成本，cost_pending_shares 显式暴露。
+    """
     fills = ledger.get("positions", {}).get(ticker, {}).get("fills", [])
-    shares = sum(f["shares"] for f in fills)
-    invested = sum(f["shares"] * f["price"] for f in fills)
+    shares = priced_shares = invested = realized = built_peak = 0.0
+    for f in fills:
+        n = float(f.get("shares") or 0)
+        p = f.get("price")
+        p = float(p) if p is not None and float(p) > 0 else None   # ≤0 视同待补
+        if n >= 0:
+            shares += n
+            if p is not None:
+                invested += n * p
+                priced_shares += n
+            built_peak = max(built_peak, shares)
+        else:
+            q = min(-n, shares)          # 不允许卖成负持仓
+            avg = invested / priced_shares if priced_shares else None
+            cut = q * (priced_shares / shares) if shares else 0.0   # 按已知成本占比等比出库
+            shares -= q
+            priced_shares -= cut
+            if avg is not None:
+                invested -= cut * avg
+                if p is not None:
+                    realized += cut * (p - avg)
+
+    floor = int(built_peak * BASE_FLOOR_FRAC)
     stats = {
-        "shares": shares,
-        "avg_cost": round(invested / shares, 3) if shares else None,
+        "shares": round(shares, 4),
+        "built_peak_shares": round(built_peak, 4),
+        "cost_pending_shares": round(shares - priced_shares, 4),
+        "avg_cost": round(invested / priced_shares, 3) if priced_shares > 0 else None,
         "invested": round(invested, 2),
+        "realized_pnl": round(realized, 2),
+        # 口径二：已实现盈亏冲抵后的实际持仓成本——「高抛低吸降低成本」的度量本身。
+        # avg_cost 按会计口径不受卖出影响，只看它会看不出增强层到底有没有摊低成本。
+        "effective_avg_cost": (round((invested - realized) / shares, 3)
+                               if shares > 0 and priced_shares > 0 else None),
         # 底仓下限（R9.0 双层结构）：高抛卖出不得使持仓跌破此股数
-        "base_floor_shares": int(shares * BASE_FLOOR_FRAC),
-        "enhancement_shares": shares - int(shares * BASE_FLOOR_FRAC),
+        "base_floor_shares": floor,
+        "enhancement_shares": max(0, int(round(shares)) - floor),
     }
     if shares and price:
         stats["market_value"] = round(shares * price, 2)
-        stats["unrealized_pct"] = round(price / stats["avg_cost"] - 1, 4)
+        if stats["avg_cost"]:
+            stats["unrealized_pct"] = round(price / stats["avg_cost"] - 1, 4)
     open_rounds = [r for r in ledger.get("enhancement_rounds", [])
                    if r.get("ticker") == ticker and r.get("status") == "open"]
     stats["open_enhancement_rounds"] = open_rounds
@@ -123,9 +163,9 @@ def main() -> int:
         rec: dict = {"ticker": t, "price": price}
 
         # ── 技术/缠论状态（只读复用，不改 55% 本体）──────
-        if df is not None and len(df) >= 200:
+        close = df["Close"].dropna() if df is not None and not df.empty else pd.Series(dtype=float)
+        if len(close) >= 200:                     # 按**有效**收盘数计门，非原始行数
             chan = compute_chan_signal(t, prices)
-            close = df["Close"].dropna()
             sma200 = float(close.rolling(200).mean().iloc[-1])
             rec["technical"] = {
                 "chan_score": round(float(chan.score), 3) if hasattr(chan, "score") else None,
@@ -159,9 +199,12 @@ def main() -> int:
         except Exception as e:
             logger.warning(f"[Core] info 失败 {t}: {e}")
             info, yft = {}, None
-        band = valuation_band(t, df if df is not None else pd.DataFrame(), fin, info)
+        band = valuation_band(t, df if df is not None else pd.DataFrame(), fin, info,
+                              filings=filings)
         rec["valuation"] = band
         core_bands[t] = band
+        # 个股估值降级须并入顶层清单，否则报告的「数据降级」看着干净、实则无公允价带
+        degraded += [f"{t}:{d}" for d in band.get("degraded", [])]
         if info.get("marketCap"):
             core_caps[t] = float(info["marketCap"])
         try:
@@ -178,21 +221,37 @@ def main() -> int:
     # ── QQQ 指数级估值代理（依赖个股 premium）──────────────
     qdf = prices.get("QQQ")
     if qdf is not None and not qdf.empty:
-        records["QQQ"]["valuation"] = qqq_valuation(qdf, core_bands, core_caps)
+        qband = qqq_valuation(qdf, core_bands, core_caps)
+        records["QQQ"]["valuation"] = qband
         records["QQQ"]["ledger"] = _ledger_stats(ledger, "QQQ", _last_close(qdf))
+        degraded += [f"QQQ:{d}" for d in qband.get("degraded", [])]
 
     degraded += edgar.degraded
     total_invested = sum(r.get("ledger", {}).get("invested", 0) or 0 for r in records.values())
+    total_mv = sum(r.get("ledger", {}).get("market_value", 0) or 0 for r in records.values())
+    pending = sum(r.get("ledger", {}).get("cost_pending_shares", 0) or 0 for r in records.values())
     total_capital = ledger.get("total_capital")
+    core_target_usd = total_capital * CORE_TARGET_FRAC if total_capital else None
     portfolio = {
         "core_target_frac": CORE_TARGET_FRAC,
         "base_floor_frac": BASE_FLOOR_FRAC,
         "total_capital": total_capital,
+        "core_target_usd": core_target_usd,
         "core_invested": round(total_invested, 2),
-        "core_built_frac": (round(total_invested / (total_capital * CORE_TARGET_FRAC), 4)
-                            if total_capital else None),
+        "core_market_value": round(total_mv, 2),
+        # 两个口径不可混用：built=已投入**资金**占目标的比例（决定还要投多少钱）；
+        # weight=当前**市值**占目标的比例（配置占位，持仓上涨会推高它但并未多投一分钱）。
+        "core_built_frac": (round(total_invested / core_target_usd, 4)
+                            if core_target_usd and total_invested else None),
+        "core_weight_frac": (round(total_mv / core_target_usd, 4)
+                             if core_target_usd else None),
+        "capital_remaining_usd": (round(core_target_usd - total_invested, 2)
+                                  if core_target_usd and total_invested else None),
         "ledger_filled": any(ledger["positions"][t]["fills"] for t in CORE_HOLDINGS
                              if t in ledger.get("positions", {})),
+        # 成本类结论（摊低均价/浮盈/高抛低吸配对）的前置条件
+        "cost_basis_complete": pending == 0,
+        "cost_pending_shares": pending,
     }
 
     out_dir = Path("output") / date_str

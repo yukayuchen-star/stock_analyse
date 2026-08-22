@@ -30,12 +30,20 @@ TTL_FILINGS = 24        # 小时
 TTL_FIN     = 72        # 财务报表季频更新，3 天足够
 
 # 关注的报表科目（yfinance income_stmt 行名）
-_FIN_ROWS = ["Total Revenue", "Gross Profit", "Net Income", "Diluted EPS"]
+# Operating Income / Pretax Income / Tax Provision 供营业利润口径正常化 EPS 使用
+# （剥离一次性非经营损益——GOOGL/AMZN 曾有半数 TTM EPS 来自投资重估，见 signals.valuation）
+_FIN_ROWS = ["Total Revenue", "Gross Profit", "Operating Income", "Pretax Income",
+             "Tax Provision", "Net Income", "Diluted EPS"]
+_FIN_SCHEMA = "|".join(_FIN_ROWS)   # 进缓存 key，科目集一变即自动失效
 # EDGAR companyfacts us-gaap tag → 统一行名
 _XBRL_TAGS = {
     "Revenues": "Total Revenue",
     "RevenueFromContractWithCustomerExcludingAssessedTax": "Total Revenue",
     "GrossProfit": "Gross Profit",
+    "OperatingIncomeLoss": "Operating Income",
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest":
+        "Pretax Income",
+    "IncomeTaxExpenseBenefit": "Tax Provision",
     "NetIncomeLoss": "Net Income",
     "EarningsPerShareDiluted": "Diluted EPS",
 }
@@ -102,6 +110,7 @@ class EdgarSource:
         if df.empty and ticker in _YF_ALIAS:
             df = self._filings_yf(_YF_ALIAS[ticker])
         if not df.empty:
+            df = df.sort_values("date", ascending=False).reset_index(drop=True)
             self.cache.set(key, df, ttl_hours=TTL_FILINGS)
         else:
             self.degraded.append(f"FILINGS_MISSING:{ticker}")
@@ -138,6 +147,7 @@ class EdgarSource:
                  "title": f.get("title", ""), "url": f.get("edgarUrl", ""),
                  "source": "yfinance"}
                 for f in fil if f.get("type") in _FORMS]
+        # 顺序由 get_filings 统一排序（yfinance 返回顺序无文档保证）
         return pd.DataFrame(rows)
 
     # ── 财务序列（年/季，含 Diluted EPS）───────────────────
@@ -150,7 +160,9 @@ class EdgarSource:
         """
         out: dict[str, pd.DataFrame] = {}
         for freq, suffix in (("annual", "a"), ("quarterly", "q")):
-            key = self.cache.make_key(f"edgar_fin_{suffix}", ticker)
+            # 科目集进 key：改 _FIN_ROWS 后旧缓存自动失效，否则 TTL_FIN(72h) 内会一直
+            # 喂回缺少新科目的旧 df（新增 Operating Income 时就踩过这个坑）
+            key = self.cache.make_key(f"edgar_fin_{suffix}", ticker, _FIN_SCHEMA)
             cached = self.cache.get(key)
             if cached is not None:
                 out[freq] = cached
@@ -199,13 +211,22 @@ class EdgarSource:
         for tag, row_name in _XBRL_TAGS.items():
             for unit_vals in gaap.get(tag, {}).get("units", {}).values():
                 for v in unit_vals:
-                    is_annual = v.get("fp") == "FY" and v.get("form") == "10-K"
-                    is_quarter = v.get("form") in ("10-Q", "10-K")
-                    if (want_annual and not is_annual) or (not want_annual and not is_quarter):
+                    end, start = v.get("end"), v.get("start")
+                    if not end or not start:
                         continue
-                    end = v.get("end")
-                    if end:
-                        series.setdefault(row_name, {})[end] = float(v["val"])
+                    # ⚠️ 必须按**期间长度**筛：一份 10-K 同时含 FY 12 个月与 Q4 3 个月两组事实，
+                    # 二者 form/fp/end 全同——不筛则后写覆盖，年度值可能落成 Q4 值（约 1/4），
+                    # 进而使 TTM EPS 偏小、P/E 带虚高 ~4 倍，误触发「极端高估 → trim」。
+                    days = (pd.Timestamp(end) - pd.Timestamp(start)).days
+                    if want_annual:
+                        if not (v.get("fp") == "FY" and v.get("form") == "10-K"
+                                and 330 <= days <= 400):
+                            continue
+                    else:
+                        if not (v.get("form") in ("10-Q", "10-K") and 80 <= days <= 100):
+                            continue
+                    # 同名行的多个 tag（如两种 Revenue 口径）按 _XBRL_TAGS 顺序取优先，不覆盖
+                    series.setdefault(row_name, {}).setdefault(end, float(v["val"]))
         if not series:
             return pd.DataFrame()
         df = pd.DataFrame(series).T

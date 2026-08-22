@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from config.stocks               import MAX_PORTFOLIO_EXPOSURE
+from config.stocks               import CORE_HOLDINGS, MAX_PORTFOLIO_EXPOSURE
 from signals.chan.chan_signal     import ChanSignalResult
 from signals.quant.factor_engine import QuantSignalResult
 from signals.macro.macro_signal  import MacroSignalResult
@@ -465,7 +465,9 @@ def _daily_action_sheet(
     bought_today = {t["code"] for t in buys}
     queued = [d for d in sorted(decisions.values(), key=lambda x: x.final_score, reverse=True)
               if d.rating in ("Buy", "Overweight") and d.suggested_position > 0
-              and d.ticker not in held and d.ticker not in bought_today]
+              and d.ticker not in held and d.ticker not in bought_today
+              # 核心名归 Core sleeve（手动执行），不得出现在战术候补里诱导重复建仓
+              and d.ticker not in CORE_HOLDINGS]
     if queued:
         L += ["## 候补（评级达标，暂被仓位上限/现金挡下）", ""]
         for d in queued:
