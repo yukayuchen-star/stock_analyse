@@ -51,6 +51,112 @@ def _load_ledger() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _baseline_plan(mode: str, budget: float, per_name: dict, records: dict) -> dict:
+    """把当月基线余额摊到各名（纯算术，不含估值/结构/财报窗口判断）。
+
+    `proportional`：按**当前**缺口占比分摊——缺口每月重算，某名补满后自动退出分摊，自我校正。
+    `largest_gap`：全额给缺口最大的一只（贪心；路径上会让单名连续独占数月）。
+    两者 12 个月终点相同，差别只在路径。财报窗口造成的推迟/改投由 skill 决定——
+    本层不知道 `next_earnings` 的语义，不该在这里做判断。
+
+    ⚠️ 分摊会产生**不足一股**的碎额（月度基线摊到七只、而单价数百美元时，高价名必然如此），
+    列入 `sub_one_share` 交给 skill 提示，不在此处四舍五入掩盖。
+    """
+    gaps = {t: r["gap_usd"] for t, r in per_name.items() if (r.get("gap_usd") or 0) > 0}
+    plan: dict = {"mode": mode, "budget_usd": round(budget, 2), "per_name": {},
+                  "sub_one_share": []}
+    if budget <= 0 or not gaps:
+        return plan
+    if mode == "proportional":
+        total = sum(gaps.values())
+        alloc = {t: budget * g / total for t, g in gaps.items()}
+    else:  # largest_gap：贪心，全额给缺口最大的一只
+        alloc = {max(gaps, key=lambda t: gaps[t]): budget}
+    for t, usd in sorted(alloc.items(), key=lambda kv: -kv[1]):
+        px = records.get(t, {}).get("price")
+        row = {"alloc_usd": round(usd, 2), "price": px}
+        if px:
+            row["shares_frac"] = round(usd / float(px), 3)
+            row["shares_whole"] = int(usd // float(px))
+            if row["shares_whole"] < 1:
+                plan["sub_one_share"].append(t)
+        plan["per_name"][t] = row
+    return plan
+
+
+def _policy_view(ledger: dict, records: dict, asof: str) -> dict:
+    """把台账 `policy` 的配置意图落成可执行口径：逐名缺口 + 当月基线执行情况。
+
+    `policy` 是**用户的配置意图，不是回测结论**——本函数只做算术，不做任何判断。
+    缺 `policy` 键时返回 {}，skill 退回「估值门为入场闸门」的旧口径。
+
+    ⚠️ 当月已投（mtd）只认**带 date 的买入 fill**：存量汇总 fill 的 date 为 null，
+    无法归月，计入 `undated_priced_buys` 并打 `MTD_UNVERIFIABLE`——宁可报不可核算，
+    也不把无日期的历史成本当成本月投入（那会让基线永远显示"已完成"）。
+    """
+    pol = ledger.get("policy") or {}
+    if not pol:
+        return {}
+    out: dict = {"degraded": []}
+    sch = pol.get("build_schedule") or {}
+    tgt = pol.get("per_name_target_usd") or {}
+
+    per_name, undated = {}, 0
+    for t in CORE_HOLDINGS:
+        inv = float((records.get(t, {}).get("ledger") or {}).get("invested") or 0.0)
+        tv = tgt.get(t)
+        row = {"invested_usd": round(inv, 2), "target_usd": tv}
+        if tv:
+            row["gap_usd"] = round(float(tv) - inv, 2)
+            row["built_frac"] = round(inv / float(tv), 4)
+        per_name[t] = row
+    out["per_name"] = per_name
+    if tgt:
+        out["target_sum_usd"] = round(sum(float(v) for v in tgt.values()), 2)
+        out["gap_sum_usd"] = round(sum(r.get("gap_usd") or 0 for r in per_name.values()), 2)
+        # 基线该投向谁：缺口最大的先补（纯算术排序，不含估值/结构判断）
+        out["largest_gaps"] = [
+            {"ticker": t, "gap_usd": r["gap_usd"]}
+            for t, r in sorted(per_name.items(), key=lambda kv: -(kv[1].get("gap_usd") or 0))
+            if r.get("gap_usd", 0) > 0][:3]
+
+    if sch:
+        month = str(asof)[:7]
+        mtd = 0.0
+        for t in CORE_HOLDINGS:
+            for f in ledger.get("positions", {}).get(t, {}).get("fills", []):
+                n, p = float(f.get("shares") or 0), f.get("price")
+                if n <= 0 or p is None or float(p) <= 0:
+                    continue
+                d = pd.to_datetime(f.get("date"), errors="coerce")
+                if pd.isna(d):
+                    undated += 1
+                elif str(d.date())[:7] == month:
+                    mtd += n * float(p)
+        base = sch.get("monthly_baseline_usd")
+        out.update({
+            "mode": sch.get("mode"),
+            "monthly_baseline_usd": base,
+            "trigger_extra_tranche_usd": sch.get("trigger_extra_tranche_usd"),
+            "horizon_months": sch.get("horizon_months"),
+            "started": sch.get("started"),
+            "current_month": month,
+            "mtd_invested_usd": round(mtd, 2),
+            "undated_priced_buys": undated,
+        })
+        if base:
+            out["baseline_remaining_usd"] = round(max(0.0, float(base) - mtd), 2)
+            out["baseline_met"] = mtd >= float(base)
+            out["baseline_allocation"] = sch.get("baseline_allocation") or "largest_gap"
+            out["baseline_plan"] = _baseline_plan(
+                out["baseline_allocation"], out["baseline_remaining_usd"], per_name, records)
+        if undated:
+            out["degraded"].append(
+                f"MTD_UNVERIFIABLE({undated} 笔买入 fill 无 date，无法归月；"
+                f"本月已投仅统计带日期的成交)")
+    return out
+
+
 def _ledger_stats(ledger: dict, ticker: str, price: float | None) -> dict:
     """派生台账口径。fills 按列表顺序视作时间序（date 可空）；shares>0=买入、<0=卖出。
 
@@ -253,6 +359,22 @@ def main() -> int:
         "cost_basis_complete": pending == 0,
         "cost_pending_shares": pending,
     }
+
+    # ── 建仓政策（用户配置意图；缺 policy 则整块缺席，skill 退回旧口径）──
+    policy = _policy_view(ledger, records, date_str)
+    if policy:
+        degraded += [f"POLICY:{d}" for d in policy.pop("degraded", [])]
+        portfolio["policy"] = policy
+        for t, row in policy.get("per_name", {}).items():
+            if t in records and row.get("target_usd"):
+                records[t].setdefault("ledger", {}).update(
+                    {k: row[k] for k in ("target_usd", "gap_usd", "built_frac") if k in row})
+        if policy.get("target_sum_usd") and core_target_usd and \
+                abs(policy["target_sum_usd"] - core_target_usd) > 1.0:
+            # 逐名目标之和须等于 core_target_usd，否则两个口径会各说各话
+            degraded.append(
+                f"POLICY:TARGET_SUM_MISMATCH(逐名合计 {policy['target_sum_usd']} "
+                f"≠ core_target_usd {core_target_usd})")
 
     out_dir = Path("output") / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
