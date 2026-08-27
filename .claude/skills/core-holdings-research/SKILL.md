@@ -72,9 +72,31 @@ python core_research.py
    8-K 与最近一期 10-Q/10-K 尝试 WebFetch 原文 URL；**本网络 sec.gov 大概率不可达**
    （TLS reset，见 json `degraded`）——失败则退而依据 form 类型 + title + 财务趋势判断，
    并标注「未读原文（网络降级）」。绝不编造 filing 内容。
+   **判断 filings 来源看 `FILINGS_MIRROR` 标，不看 `EDGAR_UNREACHABLE`**：后者只在真正发起
+   可达性探测时才写，filings 命中缓存时探测根本不会被调用（同一天的第二次运行会比第一次少一条）；
+   前者从返回行的 `source` 字段直接判定，与缓存状态无关。带 `FILINGS_MIRROR` 即
+   **filings 全部/部分来自 yfinance 镜像**，报告须写明「未读原文」。
 2. **材料事件评估**：新 8-K 是否 material（高管变动/会计变更/重大合同/治理红旗）。
    thesis 红旗清单：营收/EPS 增速转负、毛利趋势下行（`financials` 年/季序列可算）、
    竞争地位受损迹象、治理/会计异常。
+   **刚发过财报的名字看 `consensus`（不必等 `financials` 更新——报表要滞后数周）**：
+   `last_report`（actual / estimate / `surprise_pct`）、`surprise_history`（近 8 季，看**趋势**：
+   连续扩大的 beat 与逐季收窄的 beat 是两回事）、`next_quarter` 一致预期、`revisions_30d`
+   与 `eps_estimate_trend`（分析师修正方向）。
+   ⚠️⚠️⚠️ **`surprise_pct` 是混口径量，且混法逐票不同**：`epsEstimate` 恒为街面 non-GAAP，
+   而 `epsActual` 有的票给 GAAP、有的给 non-GAAP → 看 `actual_basis` 字段：
+   - `non_gaap` ⇒ 与预期同口径，**surprise 可用**；
+   - `gaap` + 该票带 `EPS_ONEOFF_INFLATED` ⇒ 打 **`SURPRISE_MIXED_BASIS`**，
+     **surprise 是口径假象，绝不可解读为超预期幅度**（实测 GOOGL +214.2% / AMZN +215.0%，
+     全部来自 GAAP 里那半数一次性损益撞上 non-GAAP 预期）；
+   - `unknown_gaap_quarter_missing` ⇒ 报表还没更新到该季（财报刚发时的常态），无法判定口径，如实说。
+   ⚠️ 带 `CONSENSUS_THIN` 时该名季度 EPS 一致预期覆盖分析师过少（NVDA 仅 4 位），
+   **不是真街面共识**，改用营收口径（`revenue_n` 通常 27+）。
+   ⚠️ **一致预期不与 GAAP 的 `pe_now` / `eps_ttm` 做任何运算**——两套口径，混用即错。
+   📌 **下季指引不在预取层**：指引是新闻稿里的散文（"$108.0 billion, plus or minus 2%"），
+   机器端点拿不到。需要时**读官方新闻稿**（`nvidianews.nvidia.com` 实测可达 200；
+   `investor.nvidia.com` 403、`sec.gov` TLS reset），再与 `next_quarter.revenue_avg` 相减
+   得「指引 vs 一致预期」缺口——**这是财报后裁决的核心数字，不是财报前的预测依据**。
 3. **公允价区间**：`valuation.band`（floor=P/E 25 分位 / mid=50 / ceiling=75 /
    extreme=90，trailing 口径）+ PEG 隐含价 + 分析师目标带三角互验。
    ⚠️⚠️⚠️ **先看一次性损益**：`pe_now` 用的是**报告** EPS，可被巨额非经营损益灌水。
@@ -84,7 +106,17 @@ python core_research.py
    报告须并列两个口径并说明差异来源**。实测 2026-08-20：GOOGL 一次性占 50.9%
    （净利 $112.19B > 当季毛利 $73.85B），报告 P/E 17.1× → 正常化 34.8×，
    折价 40% **翻转为溢价 21.7%**；AMZN 同为 50.0%，−49.4% 翻转为 +1.2%。
-   照报告口径行事会在溢价位补仓。`normalized_basis` 含营业利润/税率/股数可供复核。
+   照报告口径行事会在溢价位补仓。`normalized_basis` 含营业利润/税率/股数可供复核
+   （`quarters` = 正常化用的四季，`eps_window_end` = 报告 EPS 窗口末季）。
+   ⚠️⚠️ **窗口错配（`NORMALIZATION_WINDOW_MISMATCH`）**：yfinance 各行季度覆盖可以不齐，
+   报告 EPS 窗口与营业利润窗口可能错开若干季（AMZN 长期命中：EPS 到 26Q2、营业利润只到 26Q1）。
+   命中时 `normalization_window_mismatch` 给出 `op_end` / `eps_end` / `offset_quarters`，
+   并给同窗口重算的 `eps_ttm_reported_same_window` / `oneoff_share_same_window`。
+   **报告须写明：`oneoff_share` 把「真一次性损益」与「错开那几季的增长」混在一起，
+   真实污染度介于 `oneoff_share_same_window` 与 `oneoff_share` 之间**（AMZN 即 25.7%~50.0%）；
+   盈利增长期内 `pe_now_normalized` 与 `normalized_vs_mid` **系统性偏高**（显得更贵）。
+   **此时该名的估值裁决可靠度最低——两个口径都不可全信，不得据此触发加仓或减仓**，
+   退回 PEG（若其增长率同样被灌水则一并弃用）+ 分析师带 + 缠论结构裁决。
    ⚠️ **估值压缩陷阱**：`pe_percentile_now < 10` 时须区分「真低估」vs「成长股结构性
    P/E 压缩」（EPS 高增长追上价格属正常成熟化，历史分位带会系统性偏高）——用 PEG
    隐含价与分析师带交叉裁决，写明判断理由。
@@ -118,6 +150,57 @@ python core_research.py
      附此校验）；低吸回补 = 回落 `≤ mid` / b2/b3 / 高 VIX（与底仓累积同一套触发）；
      配对纪律：回补价 ≥ 高抛价即建议放弃本轮（记 abandoned），**禁止追高回补**；
      报告 `open_enhancement_rounds` 状态与累计节省。
+
+### 3.7 财报前裁决表（earnings gates）——每名必备
+
+`output/earnings_gates.json` 存每名在财报**之前**写死的可证伪判据；预取层把它挂到
+`holdings[t].earnings_gate` 并做完整性校验（`integrity` / `days_to_earnings`）。
+
+**⚠️ 先摆正它是什么**：这**不是股价预测**，也不产生任何 alpha 主张。
+「猜财报后涨跌」在本框架内无解——一致预期、修正方向、上季指引全是公开信息，早已在价格里；
+NVDA 连续四季 beat 且幅度单调扩大（3.5%→5.3%→5.5%→**6.2%**）本身就说明「猜 beat/miss」是错题，
+市场定的是「beat 多少 + 指引多少」，而那两个数只在发布那一刻存在。
+裁决表的**唯一**作用是：**防止事后为已发生的走势编理由**。数字出来后人会不自觉地把任何结果
+解释成「早就看出来了」，写死的阈值让你没法这么干。它是纪律工具，不是预测工具，
+**报告里不得给它安任何胜率/命中率主张**。
+
+**它的价值来源只有一条：`written_at` 早于 `earnings_date`。** 因此：
+
+- **写死后一字不改。** 就算后来觉得阈值定得不好，也只能在**下一季**的表里改，
+  当季的表必须原样留着接受检验。META 的表是 2026-08-24 写的，`written_at` 即为该日，
+  之后每次报告都**照抄**，不得随行情微调。
+- 报告里必须**并列 `written_at` 与 `earnings_date`**，让读者自己核验先后。
+- 预取层已把这条检查代码化，命中即打标，**不接受口头承诺**：
+  - `GATES_POST_HOC` ⇒ `written_at` 不早于 `earnings_date` ⇒ **该表作废**，
+    报告须写明「事后补写，无预测价值」，且**不得据其减仓**。
+  - `GATES_STALE` ⇒ 表针对的季度已过 ⇒ 本次运行须**为新一季写表**（写完 `written_at` 填当日）。
+  - `GATES_MISSING` ⇒ 该名有已知财报日却没有表 ⇒ 本次运行须补写。
+  - `GATES_UNLOCKED` ⇒ `locked≠true`，表可能被事后改过，按作废处理。
+
+**判据一律建在利润表科目上（营收 / 毛利率 / 营业利润率 / vs 一致预期），不建在 `eps surprise` 上**
+——六只里四只的 `surprise_pct` 是 GAAP 实际撞 non-GAAP 预期的混口径量（GOOGL +214.2%、AMZN +215.0%
+纯属假象，见 §3 要素 2）。只有 `actual_basis == "non_gaap"` 的名字（当前仅 MSFT）可把 surprise 作辅助参考。
+
+**命中后怎么做（写死，避免届时临时发挥）：**
+
+- 🔴 **任意两条命中 ⇒ thesis 破坏坐实 ⇒ 按政策减 1/3**，但 **`sell.max_sellable` 是硬上限**
+  （底仓下限锚定 `built_peak_shares`，会先 binding——如 NVDA 20 股减 1/3 = 6 股，卖后恰好等于下限 14）。
+  报告须附这条算术，不得只说「减 1/3」。
+- 🔴 **只命中一条 ⇒ 不减仓**，写进下一季观察项（**两点连不成线**——与 META 26Q2 利润率塌陷同一把尺子）。
+- 🟢 **命中不构成加仓理由。** 加速器只认「估值门 + 缠论买点」，
+  **「财报好所以加仓」会把择时从后门放回来**，这一条必须守住。
+- 财报窗口纪律不变：≤5TD 时该名从 `baseline_plan` 摘出、摊额按占比摊回其余名。
+
+**下季指引不在预取层**（是新闻稿里的散文），需要时读官方新闻稿——实测可达性：
+`nvidianews.nvidia.com` ✅200、`apple.com/newsroom` ✅200、`abc.xyz/investor` ✅200、
+`press.aboutamazon.com` ✅200、`news.microsoft.com` ↪301；
+`investor.nvidia.com` ❌403、`investor.atmeta.com` ❌403、`sec.gov` ❌TLS reset。
+读到指引后与 `consensus.next_quarter.revenue_avg` 相减得「指引 vs 一致预期」缺口
+——**这是财报后裁决的核心数字，不是财报前的预测依据**。
+
+**报告呈现**：§5 快照后加一张「财报前裁决表状态」总表（票 · 季度 · 财报日 · `days_to_earnings` ·
+`written_at` · `integrity` · 🔴/🟢 条数 · `max_sellable`），逐股 §3 的要素 2 里展开该名的具体判据。
+`days_to_earnings ≤ 10` 的名字须在快照里显著提示「进入财报窗口」。
 
 ### 4. QQQ（指数特例）
 

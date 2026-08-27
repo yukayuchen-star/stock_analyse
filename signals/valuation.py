@@ -116,6 +116,14 @@ def normalized_eps(fin: dict[str, pd.DataFrame]) -> dict:
           摊薄股数 = 同一季的 净利润 ÷ 稀释EPS（必须同季配对，跨季配对会算出错误股数）。
     诚实边界：营业口径会剔除掉部分**真实**价值（如长期持股重估确有价值），
               其作用是剥离不可持续的年度波动，不是否认这些收益存在。
+
+    ⚠️ 窗口错配护栏（2026-08-27 加，AMZN 连续命中）：yfinance 各行的季度覆盖**可以不齐**——
+    AMZN 的 Diluted EPS 回到 2026-06-30，而 Operating Income/Pretax/Tax 只回到 2026-03-31。
+    此时报告 TTM EPS 与正常化 TTM **错开一个季度**，`oneoff_share` 把「真一次性损益」与
+    「一个季度的增长」混在一起（AMZN 因此报 50.0%，同窗口重算实为 ~25.7%）。
+    检出即写 `normalization_window_mismatch`（含同窗口重算的 `oneoff_share_same_window`），
+    由 `valuation_band` 翻成 `NORMALIZATION_WINDOW_MISMATCH` 降级标。**只暴露不修正**：
+    缺的那季营业利润无从补，此处不臆造。
     """
     out: dict = {}
     q = fin.get("quarterly", pd.DataFrame())
@@ -147,6 +155,18 @@ def normalized_eps(fin: dict[str, pd.DataFrame]) -> dict:
         "quarters": [str(c)[:10] for c in op.index],
         "shares_quarter": str(c0)[:10],
     }
+
+    eps_end, op_end = pd.Timestamp(max(eps.index)), pd.Timestamp(max(op.index))
+    out["normalized_basis"]["eps_window_end"] = str(eps_end)[:10]
+    if eps_end != op_end:
+        mm = {"op_end": str(op_end)[:10], "eps_end": str(eps_end)[:10],
+              "offset_quarters": round((eps_end - op_end).days / 91.31)}
+        same = [c for c in op.index if c in eps.index]   # 与营业利润同窗口的报告 EPS
+        rep = float(eps[same].sum()) if len(same) == len(op) else 0.0
+        if rep > 0:
+            mm["eps_ttm_reported_same_window"] = round(rep, 3)
+            mm["oneoff_share_same_window"] = round(1 - out["eps_ttm_normalized"] / rep, 3)
+        out["normalization_window_mismatch"] = mm
     return out
 
 
@@ -217,6 +237,20 @@ def valuation_band(ticker: str, price_df: pd.DataFrame, fin: dict[str, pd.DataFr
                 f"EPS_ONEOFF_INFLATED(报告 EPS 中 {out['oneoff_share']:.1%} 为非经营损益，"
                 f"pe_now={out.get('pe_now')} 失真；须以 pe_now_normalized="
                 f"{out.get('pe_now_normalized')} 裁决)")
+        mm = norm.get("normalization_window_mismatch")
+        if mm:
+            # 阈值判定仍用混窗口的 oneoff_share（保守：不因窗口对齐而撤掉污染警告），
+            # 同窗口重算值只作上下界参考——缺季的营业利润无从补，真值落在两者之间。
+            same = ""
+            if "oneoff_share_same_window" in mm:
+                same = f"；同窗口重算一次性占比 {mm['oneoff_share_same_window']:.1%}"
+                if out.get("oneoff_share") is not None:
+                    same += f"（报告口径 {out['oneoff_share']:.1%}，真值介于两者之间）"
+            out["degraded"].append(
+                f"NORMALIZATION_WINDOW_MISMATCH(报告 EPS 窗口至 {mm['eps_end']}、"
+                f"正常化窗口至 {mm['op_end']}，错开 {mm['offset_quarters']} 季 → "
+                f"pe_now_normalized/normalized_vs_mid/oneoff_share 三者同受影响，"
+                f"盈利增长期内 pe_now_normalized 偏高){same}")
     else:
         out["degraded"].append("EPS_NORMALIZATION_UNAVAILABLE(缺营业利润/税项季度序列)")
 

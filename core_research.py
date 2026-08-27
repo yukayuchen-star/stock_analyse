@@ -24,7 +24,8 @@ from data.cache import SQLiteCache
 from data.edgar_source import EdgarSource
 from data.yfinance_source import YFinanceSource
 from signals.chan.chan_signal import compute_chan_signal
-from signals.valuation import _last_close, qqq_valuation, valuation_band
+from signals.valuation import (ONEOFF_FLAG_THRESHOLD, _last_close, qqq_valuation,
+                               valuation_band)
 
 _PRICE_DAYS = 800   # 与实盘管线同窗口（缠论需 ≥200 根，推荐 550+ TD）
 
@@ -239,11 +240,162 @@ def _fin_summary(fin: dict[str, pd.DataFrame]) -> dict:
     return out
 
 
+CONSENSUS_THIN_N = 10   # 季度一致预期覆盖分析师少于此数即打薄标
+GATES_PATH = "output/earnings_gates.json"
+
+
+def _load_gates() -> dict:
+    """财报前裁决表。文件不存在 = 整块缺席（skill 会提示补写），不生成模板。"""
+    p = Path(GATES_PATH)
+    if not p.exists():
+        return {}
+    try:
+        return (json.loads(p.read_text(encoding="utf-8")) or {}).get("gates") or {}
+    except Exception as e:
+        logger.warning(f"[Core] earnings_gates 解析失败: {e}")
+        return {}
+
+
+def _gate_view(gate: dict | None, next_earnings: str | None) -> tuple[dict, list[str]]:
+    """把一名的 gate 附上完整性校验。**只校验，不评判命中**——判定在 skill。
+
+    裁决表的价值来源**只有一条**：`written_at` 早于 `earnings_date`。
+    晚于 ⇒ 事后写的 ⇒ 无预测价值 ⇒ 打 `GATES_POST_HOC` 作废。
+    这条检查必须由代码做而非由我口头承诺——否则「事前写死」就成了一句无法核验的话。
+    """
+    if not gate:
+        return {}, (["GATES_MISSING(下次财报已知但无财报前裁决表)"] if next_earnings else [])
+    flags: list[str] = []
+    ed, wa = gate.get("earnings_date"), gate.get("written_at")
+    if ed and wa and str(wa) >= str(ed):
+        flags.append(f"GATES_POST_HOC(written_at={wa} 不早于 earnings_date={ed}，"
+                     f"事后写的表无预测价值，不得当作事前判据)")
+    if next_earnings and ed and str(next_earnings)[:10] != str(ed):
+        flags.append(f"GATES_STALE(表针对 {ed}，而下次财报是 {str(next_earnings)[:10]}"
+                     f"→ 该季已过，须为新一季写表)")
+    if not gate.get("locked"):
+        flags.append("GATES_UNLOCKED(locked≠true，表未锁定，可能被事后修改)")
+    view = dict(gate)
+    view["days_to_earnings"] = None
+    if ed:
+        try:
+            view["days_to_earnings"] = (pd.Timestamp(ed) - pd.Timestamp.today().normalize()).days
+        except Exception:
+            pass
+    view["integrity"] = "ok" if not flags else "degraded"
+    return view, flags
+
+
+def _consensus(yft, fin: dict[str, pd.DataFrame]) -> dict:
+    """卖方一致预期与历史 surprise（纯暴露，不进任何决策）。
+
+    动机（2026-08-27）：`financials` 走 EDGAR/yfinance 报表，财报后要滞后数周才更新，
+    而 `earnings_history` 在财报当晚就有 actual —— 报告因此会说「财报数据未到」，
+    对利润表成立、对 actual-vs-estimate 不成立。此函数把后者补上，让财报后的裁决
+    不必等报表。**只做事后加速，不做事前预测**：一致预期与修正方向都是公开信息，
+    早已在价格里，不构成 edge（讨论见 2026-08-27）。
+
+    ⚠️⚠️⚠️ **`surprise_pct` 是混口径量，且混法逐票不同**（2026-08-27 实测）：
+    `epsEstimate` 恒为街面 **non-GAAP**；而 `epsActual` 有的票给 GAAP、有的票给 non-GAAP——
+    GOOGL/AMZN/META/AAPL 的 actual **逐字等于**同季 GAAP 稀释 EPS，NVDA 的 actual
+    却是 non-GAAP（2.22，其 GAAP 为 2.46）。后果：GOOGL 报 **+214%**、AMZN **+215%**
+    「超预期」，纯粹是 GAAP 里那半数一次性损益撞上 non-GAAP 预期造出来的假象。
+    故此处**探测**而非假设：把 actual 与同季 GAAP 稀释 EPS 比对，写出 `actual_basis`；
+    `estimate_basis` 恒为 `non_gaap_street`。actual 走 GAAP 且该票 `oneoff_share` 超标时，
+    由 main 打 `SURPRISE_MIXED_BASIS` —— 该票的 surprise **不得解读为超预期幅度**。
+
+    下季**指引**不在此处：指引是新闻稿里的散文（"$108.0 billion, plus or minus 2%"），
+    机器端点拿不到 —— 由 skill 读官方新闻稿取，与本块的 `next_quarter` 一致预期相减。
+    """
+    out: dict = {"estimate_basis": "non_gaap_street"}
+    if yft is None:
+        return out
+
+    try:
+        hist = yft.earnings_history
+    except Exception:
+        hist = None
+    if hist is not None and not hist.empty:
+        rows = []
+        for q, r in hist.tail(8).iloc[::-1].iterrows():      # 新→旧
+            sp = r.get("surprisePercent")
+            rows.append({"quarter": str(q)[:10],
+                         "eps_actual": _f(r.get("epsActual")),
+                         "eps_estimate": _f(r.get("epsEstimate")),
+                         "surprise_pct": _f(sp, 4)})
+        out["surprise_history"] = rows
+        if rows:
+            out["last_report"] = rows[0]
+            out.update(_actual_basis(rows[0], fin))
+
+    try:
+        rev, eps = yft.revenue_estimate, yft.earnings_estimate
+    except Exception:
+        rev = eps = None
+    nxt: dict = {}
+    for src, pfx in ((rev, "revenue"), (eps, "eps")):
+        if src is None or getattr(src, "empty", True) or "0q" not in src.index:
+            continue
+        row = src.loc["0q"]
+        nxt[f"{pfx}_avg"] = _f(row.get("avg"), 4)
+        nxt[f"{pfx}_low"], nxt[f"{pfx}_high"] = _f(row.get("low"), 4), _f(row.get("high"), 4)
+        nxt[f"{pfx}_n"] = _f(row.get("numberOfAnalysts"), 0)
+    if nxt:
+        out["next_quarter"] = nxt
+
+    try:
+        trend, rev30 = yft.eps_trend, yft.eps_revisions
+    except Exception:
+        trend = rev30 = None
+    if trend is not None and not getattr(trend, "empty", True) and "0q" in trend.index:
+        r = trend.loc["0q"]
+        out["eps_estimate_trend"] = {"current": _f(r.get("current")),
+                                     "d30": _f(r.get("30daysAgo")),
+                                     "d90": _f(r.get("90daysAgo"))}
+    if rev30 is not None and not getattr(rev30, "empty", True) and "0q" in rev30.index:
+        r = rev30.loc["0q"]
+        out["revisions_30d"] = {"up": _f(r.get("upLast30days"), 0),
+                                "down": _f(r.get("downLast30days"), 0)}
+    return out
+
+
+def _actual_basis(last: dict, fin: dict[str, pd.DataFrame]) -> dict:
+    """探测 `epsActual` 走的是 GAAP 还是 non-GAAP —— 与同季 GAAP 稀释 EPS 比对。
+
+    相等 ⇒ actual 是 GAAP，而 estimate 是街面 non-GAAP → surprise 为混口径；
+    不等 ⇒ actual 是 non-GAAP，与 estimate 同口径，surprise 可用。
+    同季 GAAP 拿不到（报表尚未更新到该季，财报刚发时的常态）⇒ 无法判定，如实说不知道。
+    """
+    act = last.get("eps_actual")
+    q = fin.get("quarterly", pd.DataFrame())
+    if act is None or q.empty or "Diluted EPS" not in q.index:
+        return {"actual_basis": "unknown"}
+    col = [c for c in q.columns if str(c)[:10] == last.get("quarter")]
+    if not col:
+        return {"actual_basis": "unknown_gaap_quarter_missing"}
+    gaap = _f(q.loc["Diluted EPS", col[0]])
+    if gaap is None:
+        return {"actual_basis": "unknown"}
+    same = abs(act - gaap) < 0.005
+    return {"actual_basis": "gaap" if same else "non_gaap", "gaap_eps_same_quarter": gaap}
+
+
+def _f(v, nd: int = 3):
+    """None/NaN 安全的取数；nd=0 取整。缺失一律 None，不填 0（0 会被读成真值）。"""
+    try:
+        if v is None or pd.isna(v):
+            return None
+        return int(v) if nd == 0 else round(float(v), nd)
+    except (TypeError, ValueError):
+        return None
+
+
 def main() -> int:
     cache = SQLiteCache()
     yfs = YFinanceSource(cache)
     edgar = EdgarSource(cache)
     ledger = _load_ledger()
+    gates = _load_gates()
 
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=_PRICE_DAYS)).strftime("%Y-%m-%d")
@@ -320,6 +472,33 @@ def main() -> int:
                 rec["next_earnings"] = str(ed[0])
         except Exception:
             pass
+
+        # ── 一致预期 / surprise（纯暴露，不进决策）──────────
+        cons = _consensus(yft, fin)
+        rec["consensus"] = cons
+        nq = cons.get("next_quarter") or {}
+        eps_n = nq.get("eps_n")
+        if eps_n is not None and eps_n < CONSENSUS_THIN_N:
+            degraded.append(
+                f"{t}:CONSENSUS_THIN(下季 EPS 一致预期仅 {eps_n} 位分析师覆盖，"
+                f"非真街面共识；营收口径 n={nq.get('revenue_n')} 更可用)")
+        if not cons.get("last_report"):
+            degraded.append(f"{t}:CONSENSUS_UNAVAILABLE(无 earnings_history，无法算 surprise)")
+        # ── 财报前裁决表（只校验完整性，命中判定在 skill）──
+        gview, gflags = _gate_view(gates.get(t), rec.get("next_earnings"))
+        if gview:
+            rec["earnings_gate"] = gview
+        degraded += [f"{t}:{f}" for f in gflags]
+
+        # actual 走 GAAP + 该票一次性损益超标 ⇒ surprise 是 GAAP 实际撞 non-GAAP 预期的假象
+        oneoff = band.get("oneoff_share")
+        if cons.get("actual_basis") == "gaap" and abs(oneoff or 0) > ONEOFF_FLAG_THRESHOLD:
+            lr = cons["last_report"]
+            degraded.append(
+                f"{t}:SURPRISE_MIXED_BASIS(epsActual {lr['eps_actual']} 为 GAAP、"
+                f"epsEstimate {lr['eps_estimate']} 为街面 non-GAAP，而该票一次性损益占 "
+                f"{oneoff:.1%} → surprise {lr['surprise_pct']:+.1%} 是口径假象，"
+                f"**不得解读为超预期幅度**)")
 
         rec["ledger"] = _ledger_stats(ledger, t, price)
         records[t] = rec

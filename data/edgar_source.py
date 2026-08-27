@@ -59,6 +59,7 @@ class EdgarSource:
         self.cache = cache
         self.degraded: list[str] = []
         self._edgar_ok: bool | None = None   # 每进程探测一次
+        self._mirror_noted = False           # 镜像降级标每进程只写一次
 
     # ── EDGAR 可达性 ──────────────────────────────────────
 
@@ -92,11 +93,28 @@ class EdgarSource:
 
     # ── Filings（8-K / 10-K / 10-Q 元数据）────────────────
 
+    def _note_mirror(self, df: pd.DataFrame) -> None:
+        """镜像降级标**从数据本身判定**，不看探测结果。
+
+        历史 bug（2026-08-27 修）：原先只在 `edgar_reachable()` 探测失败时写
+        `EDGAR_UNREACHABLE`，而 filings 命中缓存时该探测根本不会被调用 →
+        **同一天的第二次运行降级清单会比第一次少一条**，报告因此漏掉 skill 要求
+        必须标注的「未读原文」。改为看返回行的 `source`：只要有非 edgar 行就记一条，
+        与缓存状态无关。
+        """
+        if self._mirror_noted or df.empty or "source" not in df.columns:
+            return
+        if (df["source"] != "edgar").any():
+            self.degraded.append(
+                "FILINGS_MIRROR(filings 来自 yfinance 镜像而非 EDGAR 原文 → 未读原文口径)")
+            self._mirror_noted = True
+
     def get_filings(self, ticker: str, limit: int = 15) -> pd.DataFrame:
         """最近 filings：columns = [date, form, title, url, source]，新→旧。"""
         key = self.cache.make_key("edgar_filings", ticker)
         cached = self.cache.get(key)
         if cached is not None:
+            self._note_mirror(cached)
             return cached.head(limit)
 
         df = pd.DataFrame()
@@ -112,6 +130,7 @@ class EdgarSource:
         if not df.empty:
             df = df.sort_values("date", ascending=False).reset_index(drop=True)
             self.cache.set(key, df, ttl_hours=TTL_FILINGS)
+            self._note_mirror(df)
         else:
             self.degraded.append(f"FILINGS_MISSING:{ticker}")
         return df.head(limit)
