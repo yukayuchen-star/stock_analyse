@@ -18,6 +18,10 @@ python core_research.py
 ```
 
 产出 `output/{date}/core_inputs.json`（date = 最新完成交易日）。读取整个 json。
+新增三块（2026-08-28）：`portfolio.macro`（VIX 档位，见 §3.8）、
+`holdings[t].technical` 的缠论结构位（`pivot`/`b3_ideal_entry`/`stop_loss`/`stroke_confirmed`）、
+`holdings[t].consensus.revision_drift`（整季一致预期漂移）。**价位一律取自这些字段，
+不得从日志手抄或目测**。
 若报错或产物缺失，如实报告，不臆造数据。
 
 ### 2. 台账检查（一切成本类结论的锚）
@@ -54,8 +58,16 @@ python core_research.py
   `baseline_allocation` 决定分摊方式：`proportional` 按**当前**缺口占比摊给全部有缺口的名字
   （缺口每月重算，补满的名字自动退出，自我校正）；`largest_gap` 全额给缺口最大的一只。
   每名给 `alloc_usd` / `price` / `shares_frac`（碎股）/ `shares_whole`（整股向下取整）。
-  `sub_one_share` 列出摊额**不足一股**的名字——报告须提示需券商支持碎股，否则该名本月按 0 股处理、
-  余额并入下一顺位（**不得**为了凑一股而超投，那会破坏分摊比例）。
+  `sub_one_share` 列出摊额**不足一股**的名字。
+- **`fractional_shares` 决定怎么执行**（预取层从台账 `build_schedule` 透传）：
+  - `true`（本项目 2026-08-28 起为 true，用户已确认券商支持碎股）→ **一律按 `shares_frac` 直接下单**，
+    `shares_whole` 与整股两步法一概不用，报告也不必再提「需券商支持碎股」。
+    此时 `sub_one_share` **只表示「摊额小」，不表示「执行不了」**，不构成任何提示或例外处理。
+  - `false` / 缺席 → 回到整股口径：`sub_one_share` 的名字本月按 0 股处理、余额并入下一顺位
+    （**不得**为了凑一股而超投，那会破坏分摊比例）。
+  ⚠️ 整股两步法（纯向下取整 → 贪心补齐）**只在 `fractional_shares=false` 时才谈**，
+  且必须同时报出它的两个代价：纯取整只投得出约 62~75% 预算；贪心补齐虽把利用率推到 ~98%，
+  却会让被凑整的名字超投（实测最坏 +39.5%）——这正是 `proportional` 想避免的加权失真。
 - **财报窗口的改投在本 skill 做，不在预取层**：预取层不认识 `next_earnings` 语义。某名 ≤5 个交易日内
   有财报 → 从 `baseline_plan` 摘掉该名，把它的 `alloc_usd` **按剩余各名的 `alloc_usd` 占比**摊回去，
   当月总投入额不变。报告须写明摘了谁、改投给了谁。
@@ -89,7 +101,10 @@ python core_research.py
    - `gaap` + 该票带 `EPS_ONEOFF_INFLATED` ⇒ 打 **`SURPRISE_MIXED_BASIS`**，
      **surprise 是口径假象，绝不可解读为超预期幅度**（实测 GOOGL +214.2% / AMZN +215.0%，
      全部来自 GAAP 里那半数一次性损益撞上 non-GAAP 预期）；
-   - `unknown_gaap_quarter_missing` ⇒ 报表还没更新到该季（财报刚发时的常态），无法判定口径，如实说。
+   - `unknown_gaap_quarter_missing` / `unknown` ⇒ 报表还没更新到该季（财报刚发时的常态），
+     无法判定口径 ⇒ 预取层打 **`SURPRISE_BASIS_UNKNOWN`**，**surprise 一律不可解读**。
+     ⚠️ 别把「没打 `SURPRISE_MIXED_BASIS`」读成「口径没问题」——财报后那几周恰恰是该护栏
+     打不出来的盲区（GOOGL/AMZN 的 +200% 假象就诞生在这几周里），所以判不出时必须显式说判不出。
    ⚠️ 带 `CONSENSUS_THIN` 时该名季度 EPS 一致预期覆盖分析师过少（NVDA 仅 4 位），
    **不是真街面共识**，改用营收口径（`revenue_n` 通常 27+）。
    ⚠️ **一致预期不与 GAAP 的 `pe_now` / `eps_ttm` 做任何运算**——两套口径，混用即错。
@@ -173,8 +188,17 @@ NVDA 连续四季 beat 且幅度单调扩大（3.5%→5.3%→5.5%→**6.2%**）�
 - 预取层已把这条检查代码化，命中即打标，**不接受口头承诺**：
   - `GATES_POST_HOC` ⇒ `written_at` 不早于 `earnings_date` ⇒ **该表作废**，
     报告须写明「事后补写，无预测价值」，且**不得据其减仓**。
-  - `GATES_STALE` ⇒ 表针对的季度已过 ⇒ 本次运行须**为新一季写表**（写完 `written_at` 填当日）。
+  - `GATES_STALE` ⇒ 表针对的季度**已经报过**（财报日已过，或下次财报比表上日期晚 45 天以上）
+    ⇒ 本次运行须**为新一季写表**（写完 `written_at` 填当日）。
+  - `GATES_DATE_DRIFT` ⇒ 财报日**估计值**漂移了几天（yfinance calendar 在公司正式确认前会动），
+    但该季**尚未报过** ⇒ **表照旧有效，绝不重写**，只在报告里注一句实际日期以哪个为准。
+    ⚠️ 这条与 `GATES_STALE` 的分界是本功能的命门：把几天的日期漂移当成过期去重写，
+    `written_at` 就会被推到今天、还带上多看两个月行情后的阈值——**表唯一的价值来源当场被毁**。
+    它不计入 `integrity`（仍显示 `ok`），因为它不影响 `written_at` 早于 `earnings_date`。
   - `GATES_MISSING` ⇒ 该名有已知财报日却没有表 ⇒ 本次运行须补写。
+    ⚠️ **但 `days_to_earnings <= 0` 时不要为该季补表**——同日或事后写的表会被
+    `GATES_POST_HOC` 判作废（代码按日期比，看不到盘中时刻，而美股大盘股盘后发布，
+    「当天上午写的」无法自证事前）。这种情况直接为**下一季**写，并在报告里说明本季没有表。
   - `GATES_UNLOCKED` ⇒ `locked≠true`，表可能被事后改过，按作废处理。
 
 **判据一律建在利润表科目上（营收 / 毛利率 / 营业利润率 / vs 一致预期），不建在 `eps surprise` 上**
@@ -198,9 +222,125 @@ NVDA 连续四季 beat 且幅度单调扩大（3.5%→5.3%→5.5%→**6.2%**）�
 读到指引后与 `consensus.next_quarter.revenue_avg` 相减得「指引 vs 一致预期」缺口
 ——**这是财报后裁决的核心数字，不是财报前的预测依据**。
 
+#### 指引采集 —— 每次财报后的**强制动作**（2026-08-28 制度化）
+
+`guidance_captured = false` / 带 `GATES_NO_GUIDANCE` ⇒ 该名的裁决表缺**公司自己给的下季指引**。
+
+**为什么这是最该补的一条**：指引是财报前信息量最高的单个数字（市场交易的正是
+「beat 多少 + guide 多少」），而且**写表时它就已经可得**——它躺在上一季的新闻稿里。
+2026-08-28 审计：六只里只有 NVDA 录了，另五只 7 月底就报过、指引一直在那儿没人取。
+**这是流程缺口，不是数据缺口**，所以用流程补。
+
+**动作**（每名每季一次，在该名财报后的第一次运行做）：
+1. WebFetch 官方新闻稿——实测可达：`nvidianews.nvidia.com` ✅、`apple.com/newsroom` ✅、
+   `abc.xyz/investor` ✅、`press.aboutamazon.com` ✅、`news.microsoft.com` ↪301；
+   ❌ `investor.nvidia.com` 403、`investor.atmeta.com` 403、`sec.gov` TLS reset。
+2. 取三样写进**下一季** gate 的 `basis`：`guidance_revenue_mid_usd` + `guidance_revenue_band_pct`、
+   `guidance_gross_margin`（若给）、`guidance_source`（写明来源与「已读原文」）。
+   顺带取**分部数**（NVDA Data Center / AMZN AWS / MSFT 云 / GOOGL Cloud / META RL）
+   存进 `latest_quarter_official` —— 这些是 yfinance 合并利润表里**根本没有**的东西，
+   而这六只的 thesis 恰恰全在分部上（NVDA 的 `data_center_qoq` 判据就只能靠它）。
+3. 与 `consensus.next_quarter.revenue_avg` 相减得「**指引 vs 一致预期**」缺口。
+   ⚠️ 财报刚发时一致预期**还没被修正过**，此缺口会偏大；只要每季都在同一时点测量，
+   口径就是一致的——但报告须注明这一点，不得把它读成纯粹的「超预期幅度」。
+4. ⚠️ **只补 `basis`，不动 `red`/`green`/`written_at`**。若该季的表已写死而当时没录指引，
+   **不得**回填后假装当初就有——补录须写进**下一季**的表。
+
+**若新闻稿抓不到**（改版 / 封锁 / 超时）：如实写「指引未取得（原因）」，
+判据退回只挂一致预期，并明说少了最有信息量的一条。**绝不凭记忆或推测填指引数字。**
+
+⚠️ **这是整套「深入分析」的单点故障**：指引与分部**只有新闻稿这一条路**
+（EDGAR XBRL 本机 TLS 不通、investor 站 403）。它一断，能力直接归零——
+报告须在 `degraded` 里如实反映，不得让读者以为分析深度没变。
+
 **报告呈现**：§5 快照后加一张「财报前裁决表状态」总表（票 · 季度 · 财报日 · `days_to_earnings` ·
 `written_at` · `integrity` · 🔴/🟢 条数 · `max_sellable`），逐股 §3 的要素 2 里展开该名的具体判据。
 `days_to_earnings ≤ 10` 的名字须在快照里显著提示「进入财报窗口」。
+
+### 3.8 三轴综合裁决 —— 买点 / 卖点 / 长持理由
+
+核心 sleeve 的三根轴，各自回答**不同的问题**，任何一根都不能替另一根作答：
+
+| 轴 | 回答的问题 | 数据来源（`core_inputs.json`） |
+|---|---|---|
+| **结构（缠论）** | **什么价位、什么时候进** | `technical`：`buy_point` / `pivot{ZD,ZG,mid}` / `b3_ideal_entry` / `stop_loss` / `r_ratio` / `stroke_confirmed` |
+| **环境（VIX 档）** | **要不要加大力度** | `portfolio.macro`：`vix` / `regime` / `panic_accelerator` |
+| **公司潜力** | **该不该持有这家公司** | `financials` 趋势 + `consensus.revision_drift` + `earnings_gate` + `valuation` |
+
+#### ⚠️ 三轴是 AND，不是加权 —— 这一条最要紧
+
+**不得**为核心 sleeve 造任何 `score = w1×结构 + w2×环境 + w3×基本面` 的合成分。
+理由有两层，都必须守住：
+1. **没有回测背书**。战术侧的 55/35/10 好歹来自（且已被 R1.3 大幅修正的）实证；
+   核心侧一个数都没有。造权重等于凭空发明一个精度主张。
+2. **加权会让一根轴把另一根买断**。估值便宜买不回一个坏 thesis；thesis 再好也不能让
+   高位入场变成好入场。三个问题不同质，**必须各自独立通过**。
+
+所以裁决一律写成「逐条过/不过 + 哪条否决」，**不写合成分**。
+
+#### 🔴 与战术 sleeve **方向相反**的两条，务必分清
+
+| | 战术 sleeve | **核心 sleeve** |
+|---|---|---|
+| 结构 vs 基本面冲突 | **结构优先**（背离规则 0.70×chan，结构 > 统计） | **thesis 优先**——基本面红旗**否决**缠论买点 |
+| VIX 升高 | 节流（仓位上限下调、买点门槛收紧） | **加速**（恐慌是加仓窗口） |
+
+为什么核心侧要反过来：持有期不同。战术持有数周，**入场点错了就是全部损失**；
+核心持有数年，**入场差几个点可以被时间摊平，但 thesis 破了就是永久损失**。
+把战术的「结构优先」搬进核心，等于用一个几周尺度的规则去管一个几年尺度的仓位。
+
+⚠️ **`macro.chan_buy_allowed` 不适用于核心 sleeve**：那是战术侧 VIX 四档对买点类型的门控
+（15–25 档只放行 b1/b2）。核心 sleeve 的 policy 明写扳机接受 **b1/b2/b3**，
+且核心遇恐慌要**加速**而非收紧——拿战术的门去卡核心，方向正好反了。
+该字段只作参照，**不得用来否决核心的加速器**。
+
+#### 买点（加速器）：三条全过才成立
+
+```
+① 公司潜力过门  thesis 无红旗坐实 且 earnings_gate 未 🔴两条
+② 估值过门      price ≤ mid（带 EPS_ONEOFF_INFLATED 时用 normalized_vs_mid ≤ 0）
+③ 结构过门      buy_point ∈ {b1,b2,b3} 且 stroke_confirmed = true
+────────────────────────────────────────────────
+任一不过 ⇒ 加速器不成立（写明是哪条否决的，不得含糊成「综合看」）
+VIX 是**加码器不是门**：panic_accelerator=true ⇒ tranche 可加大；false 不阻止任何一条
+```
+
+**价位怎么给**（全部来自 `technical`，不得手抄日志、不得目测）：
+- `b3_ideal_entry` = 理想回踩区 [ZG×0.99, ZG×1.03]，`entry_band` = 实际建议区间。
+- `b3_window_passed = true` ⇒ 必须写明「回踩窗口已过、现价高出上沿 `above_ideal_pct`」，
+  这是**次优入场**；同时重申「等它跌回 ZG 再买」是错误逻辑（届时结构已变，b3 大概率消失）。
+- `stop_loss` / `r_ratio` 只作**结构位置说明**——底仓不设止损，穿越回撤长持。
+- ⚠️ `stroke_confirmed = false`（未定笔）⇒ **结构条不过，加速器一律不成立**。
+  财报反应日必然落在这里，这正是右端护栏的设计目的：**结构上禁止在反应日交易**。
+
+#### 卖点：底仓只有两个，且都不是结构给的
+
+1. **thesis 破坏坐实**（gate 🔴 两条）⇒ 减 1/3，**但 `sell.max_sellable` 硬封顶**；
+2. **`price > extreme`**（P/E > 历史 90 分位）⇒ 减 1/3。
+
+**缠论 s1/s2/s3 对底仓一律无效**（`insight_backtest_exit_faithful`：长牛股 swing<hold 是结构必然）。
+卖点只在**增强层**生效，且必须**估值必要 + 结构确认**双条件：
+`price ≥ ceiling` **且** s1/s2 顶背驰；卖出股数 ≤ `enhancement_shares` 且不得跌破 `base_floor_shares`。
+
+#### 长持理由：写不出证伪条件，就等于没有理由
+
+每只票的 §3 要素 5 末尾必须给出**四段式长持理由**，缺一段即视为没有 thesis：
+
+| 段 | 内容 | 取自 |
+|---|---|---|
+| **驱动** | 什么在增长 / 什么在扩张 | 营收 YoY、毛利率或 OM 轨迹、分部（若已录） |
+| **证据** | 具体是哪个数字，以及它在往哪个方向走 | `financials` 逐季 + `consensus.revision_drift`（营收/EPS 预期漂移 + 上下修家数） |
+| **证伪条件** | **什么情况下我不再持有** | 该名 `earnings_gate` 的 🔴 判据 + 财报日 |
+| **可靠度** | 这套判断有多少水分 | 该名的 `degraded` 标（分位不可靠 / 一次性污染 / 窗口错配 / 未读原文 / 无指引） |
+
+⚠️ **证伪条件不许写成「基本面恶化就卖」这类不可检验的话**——必须是 gate 里那种
+「营收 < $X」「OM < Y%」的数字判据。**写不出数字，就说明这只票现在只是个仓位，不是个论点**，
+报告须直说这句，不得用文字包装过去。
+
+⚠️ **`revision_drift` 的用法**：它只描述**市场预期在往哪走**，不预测财报结果
+（预期是公开信息、早在价格里）。带 `DRIFT_THIN` 时只列原始点、**不得判断方向**。
+它的价值是给「驱动」段提供一个连续的外部对照：公司叙事在改善而分析师在下修，
+两者背离本身就是要写进报告的事实。
 
 ### 4. QQQ（指数特例）
 
@@ -217,6 +357,9 @@ QQQ 无 thesis 风险、无一次性损益问题、无估值分位样本问题�
 报告开头给组合快照：Core 目标 70%（`core_target_usd`）/ 已建比例（成本完整时用
 `core_built_frac` + `capital_remaining_usd`，成本待补时用 `core_weight_frac` 并注明配置口径）/ 剩余
 额度 / 本日各名建议汇总表（票·层·动作·价位·股数）/ `degraded` 数据降级清单。
+
+快照须含**一行宏观**：`macro.vix` / `regime` / `panic_accelerator`
+（核心 sleeve 的唯一宏观输入；**不是**战术侧的 35% macro_score，口径区别见 §3.8）。
 
 配了 `policy` 时快照须**多一行本月基线状态**：`monthly_baseline_usd` / `mtd_invested_usd` /
 `baseline_remaining_usd` / `baseline_allocation`，并附逐名 `target_usd`·`gap_usd`·`built_frac` 表

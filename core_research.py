@@ -23,7 +23,7 @@ from config.stocks import (BASE_FLOOR_FRAC, CORE_HOLDINGS, CORE_LEDGER_PATH,
 from data.cache import SQLiteCache
 from data.edgar_source import EdgarSource
 from data.yfinance_source import YFinanceSource
-from signals.chan.chan_signal import compute_chan_signal
+from signals.chan.chan_signal import HIGH_VOL_PCT, compute_chan_signal
 from signals.valuation import (ONEOFF_FLAG_THRESHOLD, _last_close, qqq_valuation,
                                valuation_band)
 
@@ -144,6 +144,7 @@ def _policy_view(ledger: dict, records: dict, asof: str) -> dict:
             "current_month": month,
             "mtd_invested_usd": round(mtd, 2),
             "undated_priced_buys": undated,
+            "fractional_shares": bool(sch.get("fractional_shares")),
         })
         if base:
             out["baseline_remaining_usd"] = round(max(0.0, float(base) - mtd), 2)
@@ -241,6 +242,7 @@ def _fin_summary(fin: dict[str, pd.DataFrame]) -> dict:
 
 
 CONSENSUS_THIN_N = 10   # 季度一致预期覆盖分析师少于此数即打薄标
+_GATE_ROLL_DAYS = 45    # 下次财报比表上日期晚过此天数 ⇒ 季度已滚过（而非日期漂移）
 GATES_PATH = "output/earnings_gates.json"
 
 
@@ -270,19 +272,60 @@ def _gate_view(gate: dict | None, next_earnings: str | None) -> tuple[dict, list
     if ed and wa and str(wa) >= str(ed):
         flags.append(f"GATES_POST_HOC(written_at={wa} 不早于 earnings_date={ed}，"
                      f"事后写的表无预测价值，不得当作事前判据)")
-    if next_earnings and ed and str(next_earnings)[:10] != str(ed):
-        flags.append(f"GATES_STALE(表针对 {ed}，而下次财报是 {str(next_earnings)[:10]}"
-                     f"→ 该季已过，须为新一季写表)")
     if not gate.get("locked"):
         flags.append("GATES_UNLOCKED(locked≠true，表未锁定，可能被事后修改)")
-    view = dict(gate)
-    view["days_to_earnings"] = None
+
+    d2e = None
     if ed:
         try:
-            view["days_to_earnings"] = (pd.Timestamp(ed) - pd.Timestamp.today().normalize()).days
+            d2e = (pd.Timestamp(ed) - pd.Timestamp.today().normalize()).days
         except Exception:
             pass
-    view["integrity"] = "ok" if not flags else "degraded"
+
+    # 「过期」的定义必须是**那一季已经报过**，不能是「日期对不上」（2026-08-28 修）。
+    # yfinance 的 calendar 给的是**估计日**，公司正式确认前routinely 漂移几天；
+    # 原先按 `!=` 判 stale，而 skill 收到 GATES_STALE 就会「为新一季写表、written_at 填当日」
+    # —— 一次几天的日期漂移就足以把 written_at 推到今天，**表唯一的价值来源被自己毁掉**，
+    # 且新阈值是在多看了两个月行情之后定的。这正是本功能要防的事，故判据收紧为二选一：
+    #   ① d2e < 0：财报日已过（**不依赖 calendar**，calendar 取不到时仍然有效——
+    #      原先两条 stale/missing 都挂在 next_earnings 上，calendar 一失败就整体失明）；
+    #   ② 下次财报比表上的日期晚 45 天以上：季度真的滚过去了（季度间隔 ~91 天，漂移只有几天）。
+    nxt = str(next_earnings)[:10] if next_earnings else None
+    rolled = False
+    if nxt and ed:
+        try:
+            rolled = (pd.Timestamp(nxt) - pd.Timestamp(ed)).days > _GATE_ROLL_DAYS
+        except Exception:
+            rolled = False
+    if ed and ((d2e is not None and d2e < 0) or rolled):
+        flags.append(f"GATES_STALE(表针对 {ed}"
+                     + (f"，下次财报 {nxt}" if nxt else "，该日已过")
+                     + " → 该季已过，须为新一季写表)")
+    elif nxt and ed and nxt != ed:
+        # 日期漂移但该季未过 ⇒ **只提示，绝不触发重写**；不计入 integrity。
+        flags.append(f"GATES_DATE_DRIFT(表按 {ed} 写，calendar 现估 {nxt}，"
+                     f"相差 {abs((pd.Timestamp(nxt) - pd.Timestamp(ed)).days)} 天 → "
+                     f"财报日估计值漂移，属正常；**表照旧有效，不得重写**)")
+
+    # ── 指引采集（2026-08-28 制度化）──────────────────────
+    # 公司自己给的下季指引是财报前**信息量最高**的一个数，而且写表时它就已经可得
+    # （上一季新闻稿里）。审计发现 6 只里只有 NVDA 录了 —— 这是**流程缺口不是数据缺口**：
+    # 另五只 7 月底就报过，指引躺在它们的新闻稿里，只是没人去取。
+    # 故此处显式点名，逼报告每次面对它；不计入 integrity（缺指引不影响表的事前性）。
+    b = gate.get("basis") or {}
+    has_g = any(k.startswith("guidance") for k in b)
+    view_guidance = has_g
+    if not has_g:
+        flags.append("GATES_NO_GUIDANCE(表里没有公司自己的下季指引 → 判据只能挂在"
+                     "一致预期上，少了最有信息量的那一条；下次财报后须读官方新闻稿补录)")
+
+    view = dict(gate)
+    view["guidance_captured"] = view_guidance
+    view["days_to_earnings"] = d2e
+    # 日期漂移不是完整性问题：它不影响 written_at 早于 earnings_date 这一唯一价值来源。
+    _SOFT = ("GATES_DATE_DRIFT", "GATES_NO_GUIDANCE")
+    hard = [f for f in flags if not f.startswith(_SOFT)]
+    view["integrity"] = "ok" if not hard else "degraded"
     return view, flags
 
 
@@ -317,7 +360,9 @@ def _consensus(yft, fin: dict[str, pd.DataFrame]) -> dict:
         hist = None
     if hist is not None and not hist.empty:
         rows = []
-        for q, r in hist.tail(8).iloc[::-1].iterrows():      # 新→旧
+        # 先排序再截取：yfinance 直接由 Yahoo 的 list 建帧、不保证升序，
+        # 若某日返回新→旧，tail(8) 取到的会是**最老**的八季，last_report 静默指向陈旧季度。
+        for q, r in hist.sort_index().tail(8).iloc[::-1].iterrows():      # 新→旧
             sp = r.get("surprisePercent")
             rows.append({"quarter": str(q)[:10],
                          "eps_actual": _f(r.get("epsActual")),
@@ -380,6 +425,117 @@ def _actual_basis(last: dict, fin: dict[str, pd.DataFrame]) -> dict:
     return {"actual_basis": "gaap" if same else "non_gaap", "gaap_eps_same_quarter": gaap}
 
 
+DRIFT_MIN_POINTS = 3    # 少于此观测数不下漂移结论
+
+
+def _revision_drift(ticker: str, asof: str) -> dict:
+    """整季的一致预期修正漂移 —— **数据早就在硬盘上，此前没有任何代码读它**。
+
+    动机（2026-08-28 审计）：`output/{date}/core_inputs.json` 每天都写了 `consensus`
+    快照，但只有 `eps_estimate_trend` 的 30d/90d 两个点被看见，**营收的修正漂移
+    完全不可见**。而修正方向是财报前信息量最高的公开信号之一（不是 edge——它公开、
+    已在价格里——但它是判断「市场预期在往哪走」的分母）。
+
+    口径：按日期升序取每天的 `next_quarter.revenue_avg` / `eps_avg` 与
+    `revisions_30d`，报首末值、变动幅度、观测天数。
+    ⚠️ **只描述预期怎么变，不预测财报结果**；观测不足 `DRIFT_MIN_POINTS` 天时
+    只给原始点、明确说不下结论（打 `DRIFT_THIN`）。
+    """
+    pts = []
+    for p in sorted(Path("output").glob("*/core_inputs.json")):
+        day = p.parent.name
+        if day > asof:
+            continue
+        try:
+            h = json.loads(p.read_text(encoding="utf-8")).get("holdings", {}).get(ticker) or {}
+        except Exception:
+            continue
+        c = h.get("consensus") or {}
+        nq, rv = c.get("next_quarter") or {}, c.get("revisions_30d") or {}
+        if not nq:
+            continue
+        pts.append({"date": day, "revenue_avg": nq.get("revenue_avg"),
+                    "eps_avg": nq.get("eps_avg"),
+                    "up": rv.get("up"), "down": rv.get("down")})
+    if not pts:
+        return {}
+    out: dict = {"points": pts, "n_days": len(pts),
+                 "window": [pts[0]["date"], pts[-1]["date"]]}
+    for k in ("revenue_avg", "eps_avg"):
+        a, b = pts[0].get(k), pts[-1].get(k)
+        if a and b:
+            out[f"{k}_first"], out[f"{k}_last"] = a, b
+            out[f"{k}_chg_pct"] = round(b / a - 1, 4)
+    if len(pts) < DRIFT_MIN_POINTS:
+        out["degraded"] = (f"DRIFT_THIN(仅 {len(pts)} 天观测 < {DRIFT_MIN_POINTS}，"
+                           f"只列原始点，**不得据此判断修正方向**)")
+    return out
+
+
+def _vix_view(cache) -> tuple[dict, list[str]]:
+    """VIX 档位 —— 核心 sleeve 的**唯一**宏观输入。
+
+    为什么是 VIX 而不是完整 macro_score（2026-08-28）：台账 policy 把
+    「VIX≥25 恐慌回撤」写成了加速器的第三个扳机，而在此之前核心 sleeve 的输入里
+    **一个宏观字段都没有** —— 那条扳机根本无从判定，写了等于没写。
+    这里只补它真正需要的：VIX 水平 + 四档制度 + 仓位上限。
+
+    ⚠️ **刻意不算 35% 的 macro_score**：那是战术 sleeve 的量，需要全池价格 + 桶强度，
+    只喂 7 只核心名会算出一个被稀释得没有意义的数，再拿去做决策就是自欺。
+    核心 sleeve 用 VIX 门控，不用 macro_score —— 报告须照此口径说话。
+    """
+    try:
+        from data.fred_source import FREDSource
+        from signals.macro.regime import chan_buy_threshold, classify_vix
+        df = FREDSource(cache).get_macro("VIXCLS")
+        if df is None or df.empty:
+            return {}, ["VIX_UNAVAILABLE(FRED VIXCLS 空 → 加速器的 VIX≥25 扳机本次无法判定)"]
+        vix = float(df["value"].dropna().iloc[-1])
+        asof = str(df.index[-1])[:10] if hasattr(df.index[-1], "year") else None
+        reg = classify_vix(vix)
+        return ({"vix": round(vix, 2), "vix_asof": asof, "regime": reg.regime,
+                 "position_limit": reg.position_limit,
+                 "chan_buy_allowed": chan_buy_threshold(reg),
+                 "panic_accelerator": vix >= 25.0}, [])
+    except Exception as e:
+        return {}, [f"VIX_UNAVAILABLE({type(e).__name__} → 加速器的 VIX≥25 扳机本次无法判定)"]
+
+
+def _entry_window(chan, piv: dict, price: float | None) -> dict:
+    """b3 的理想回踩区（CLAUDE.md 明文）：ZG×0.99 ~ ZG×1.03。
+
+    价已高于上沿 ⇒ 回踩窗口已过 ⇒ 改报 price×0.995~1.005 并打 `b3_window_passed`。
+    **「等它跌回 ZG 再买」是错误逻辑**——届时结构已变，b3 大概率消失；
+    要么按现价接受，要么放弃本轮。此处只做算术，是否入场由 skill 综合裁决。
+    """
+    bp, zg = chan.buy_point_type, piv.get("ZG")
+    if bp not in ("b3", "lb2") or not zg or not price:
+        return {}
+    # ⚠️ 必须用**已发布的那个 ZG**（同样 round 到 2 位）来算，不能用原始值：
+    # `technical.pivot.ZG` 发出去的是 465.44，若这里拿原始 465.4467 算，
+    # 读者按文件里的 ZG×1.03 复现会得到 479.40 而文件写着 479.41——
+    # 价位就不可复现了，而「不得手抄日志、须可从文件复现」正是暴露这些字段的理由。
+    zg = round(float(zg), 2)
+    lo, hi = round(zg * 0.99, 2), round(zg * 1.03, 2)
+    passed = price > hi
+    out = {"b3_ideal_entry": [lo, hi], "b3_window_passed": passed}
+    if passed:
+        out["entry_band"] = [round(price * 0.995, 2), round(price * 1.005, 2)]
+        out["above_ideal_pct"] = round(price / hi - 1, 4)
+    else:
+        out["entry_band"] = [lo, hi]
+    return out
+
+
+def _pct(v) -> str:
+    """百分比格式化；None/NaN（Yahoo 缺 surprisePercent）返回「未提供」而不是抛 TypeError
+    或印出 `nan%`。缺失说「未提供」，不伪装成一个数。"""
+    try:
+        return "未提供" if v is None or pd.isna(v) else f"{float(v):+.1%}"
+    except (TypeError, ValueError):
+        return "未提供"
+
+
 def _f(v, nd: int = 3):
     """None/NaN 安全的取数；nd=0 取整。缺失一律 None，不填 0（0 会被读成真值）。"""
     try:
@@ -425,16 +581,34 @@ def main() -> int:
         if len(close) >= 200:                     # 按**有效**收盘数计门，非原始行数
             chan = compute_chan_signal(t, prices)
             sma200 = float(close.rolling(200).mean().iloc[-1])
+            # ⚠️ **只读暴露，不改缠论 55% 本体的任何判定逻辑**（沿用 R6.2 边界）。
+            # 动机（2026-08-28）：ZG/ZD、结构止损、R、定笔状态本来就已算出，却只进
+            # DEBUG 日志——skill 因此**无法从自己的输入文件算出 b3 理想回踩区**，
+            # 之前那份报告里的入场带是我从日志行手抄的，不可复现也不可核验。
+            piv = chan.current_pivot or {}
             rec["technical"] = {
                 "chan_score": round(float(chan.score), 3) if hasattr(chan, "score") else None,
                 "buy_point": chan.buy_point_type,
                 "sell_point": chan.sell_point_type,
+                "divergence": bool(chan.divergence),
                 "weekly_trend": chan.weekly_trend,
                 "trend_type": chan.trend_type,
+                "level_resonance": int(chan.level_resonance),
+                "confidence": round(float(chan.confidence), 3),
                 "sma200": round(sma200, 2),
                 "dev_200dma": round(price / sma200 - 1, 4) if price else None,
                 "atr_pct": round(float(chan.atr_pct), 4),
+                # 右端稳定性三层防护的**当前状态**（未定笔 = 结构上禁止交易，如财报反应日）
+                "stroke_confirmed": bool(chan.stroke_confirmed),
+                "fractal_stop": bool(chan.fractal_stop),
+                "high_vol": bool(float(chan.atr_pct) >= HIGH_VOL_PCT),
+                # 中枢与结构止损
+                "pivot": {k: round(float(v), 2) for k, v in piv.items()
+                          if k in ("ZD", "ZG", "mid") and v is not None} or None,
+                "stop_loss": round(float(chan.stop_loss), 2) if chan.stop_loss else None,
+                "r_ratio": round(float(chan.r_ratio), 4) if chan.r_ratio else None,
             }
+            rec["technical"].update(_entry_window(chan, piv, price))
 
         if t == "QQQ":
             records[t] = rec   # 估值代理在个股跑完后补
@@ -475,6 +649,11 @@ def main() -> int:
 
         # ── 一致预期 / surprise（纯暴露，不进决策）──────────
         cons = _consensus(yft, fin)
+        drift = _revision_drift(t, date_str)
+        if drift:
+            cons["revision_drift"] = drift
+            if drift.get("degraded"):
+                degraded.append(f"{t}:{drift['degraded']}")
         rec["consensus"] = cons
         nq = cons.get("next_quarter") or {}
         eps_n = nq.get("eps_n")
@@ -492,12 +671,20 @@ def main() -> int:
 
         # actual 走 GAAP + 该票一次性损益超标 ⇒ surprise 是 GAAP 实际撞 non-GAAP 预期的假象
         oneoff = band.get("oneoff_share")
+        # 报表滞后数周，财报刚发时同季 GAAP 拿不到 ⇒ 口径判不出 ⇒ SURPRISE_MIXED_BASIS 无法触发。
+        # 而这**正是**该护栏要防的窗口（GOOGL/AMZN 的 +200% 假象就诞生在这几周里）。
+        # 判不出时必须显式说「判不出」，否则 degraded 是干净的，报告会读成「口径没问题」。
+        if cons.get("actual_basis", "").startswith("unknown") and cons.get("last_report"):
+            degraded.append(
+                f"{t}:SURPRISE_BASIS_UNKNOWN(同季 GAAP EPS 尚不可得，无法判定 epsActual 走 "
+                f"GAAP 还是 non-GAAP → **surprise 不可解读**，不得当作超预期幅度；"
+                f"报表更新到该季后本标自动消失)")
         if cons.get("actual_basis") == "gaap" and abs(oneoff or 0) > ONEOFF_FLAG_THRESHOLD:
             lr = cons["last_report"]
             degraded.append(
                 f"{t}:SURPRISE_MIXED_BASIS(epsActual {lr['eps_actual']} 为 GAAP、"
                 f"epsEstimate {lr['eps_estimate']} 为街面 non-GAAP，而该票一次性损益占 "
-                f"{oneoff:.1%} → surprise {lr['surprise_pct']:+.1%} 是口径假象，"
+                f"{oneoff:.1%} → surprise {_pct(lr['surprise_pct'])} 是口径假象，"
                 f"**不得解读为超预期幅度**)")
 
         rec["ledger"] = _ledger_stats(ledger, t, price)
@@ -538,6 +725,10 @@ def main() -> int:
         "cost_basis_complete": pending == 0,
         "cost_pending_shares": pending,
     }
+    macro, mflags = _vix_view(cache)
+    if macro:
+        portfolio["macro"] = macro
+    degraded += mflags
 
     # ── 建仓政策（用户配置意图；缺 policy 则整块缺席，skill 退回旧口径）──
     policy = _policy_view(ledger, records, date_str)

@@ -64,6 +64,7 @@ def ttm_eps_series(fin: dict[str, pd.DataFrame],
     `series.attrs['real_dates']` 记有多少点用上了真实申报日（其余为滞后模型近似）。
     """
     points: dict[pd.Timestamp, float] = {}
+    ends: dict[pd.Timestamp, pd.Timestamp] = {}   # 可得日 → 该 TTM 的期末
     tiers: list[str] = []
     a = fin.get("annual", pd.DataFrame())
     if not a.empty and "Diluted EPS" in a.index:
@@ -71,6 +72,7 @@ def ttm_eps_series(fin: dict[str, pd.DataFrame],
             if pd.notna(v):
                 d, tier = availability_date(pd.Timestamp(col), filings)
                 points[d] = float(v)
+                ends[d] = pd.Timestamp(col)
                 tiers.append(tier)
     q = fin.get("quarterly", pd.DataFrame())
     if not q.empty and "Diluted EPS" in q.index:
@@ -81,12 +83,14 @@ def ttm_eps_series(fin: dict[str, pd.DataFrame],
         for end, v in ttm.items():   # 季度 TTM 更细，覆盖同期时以其为准（后写覆盖）
             d, tier = availability_date(end, filings)
             points[d] = float(v)
+            ends[d] = pd.Timestamp(end)
             tiers.append(tier)
     if not points:
         return pd.Series(dtype=float)
     out = pd.Series(points).sort_index()
     out.attrs["approx_points"] = sum(t == "lag_model" for t in tiers)
     out.attrs["total_points"] = len(tiers)
+    out.attrs["period_end"] = ends
     return out
 
 
@@ -103,7 +107,8 @@ def trailing_pe_series(close: pd.Series, ttm: pd.Series) -> pd.Series:
 ONEOFF_FLAG_THRESHOLD = 0.15   # 一次性占报告 EPS 超此比例即打降级标
 
 
-def normalized_eps(fin: dict[str, pd.DataFrame]) -> dict:
+def normalized_eps(fin: dict[str, pd.DataFrame],
+                   eps_window_end: pd.Timestamp | None = None) -> dict:
     """营业利润口径的正常化 TTM EPS —— 剥离一次性非经营损益。
 
     动机（2026-08-21 实测）：trailing P/E 用**报告** EPS，而净利润可被巨额非经营损益灌水。
@@ -131,12 +136,17 @@ def normalized_eps(fin: dict[str, pd.DataFrame]) -> dict:
     if q.empty or not all(r in q.index for r in need):
         return out
 
-    op = q.loc["Operating Income"].dropna()[:4]
-    pre = q.loc["Pretax Income"].dropna()[:4]
-    tax = q.loc["Tax Provision"].dropna()[:4]
-    ni, eps = q.loc["Net Income"].dropna(), q.loc["Diluted EPS"].dropna()
-    if len(op) < 4 or pre.empty or tax.empty:
+    # ⚠️ 三行必须**对齐到公共季度**再取最近四季（2026-08-28 加）。原先各自 `.dropna()[:4]`：
+    # 任一行缺一季，`etr = tax.sum()/pre.sum()` 就跨到了与 `op.sum()` 不同的 TTM 上，
+    # 且守卫只查 `pre/tax` 非空、不查长度——pre 3 季 / tax 4 季也会静默通过，
+    # 算出偏低的税率再喂进 `eps_ttm_normalized`。这与本函数要检出的窗口错配是同一类缺陷。
+    rows = {r: q.loc[r].dropna() for r in ("Operating Income", "Pretax Income", "Tax Provision")}
+    cols = sorted(set.intersection(*(set(v.index) for v in rows.values())),
+                  key=pd.Timestamp, reverse=True)[:4]
+    if len(cols) < 4:
         return out
+    op, pre, tax = (rows[r][cols] for r in ("Operating Income", "Pretax Income", "Tax Provision"))
+    ni, eps = q.loc["Net Income"].dropna(), q.loc["Diluted EPS"].dropna()
 
     common = [c for c in ni.index if c in eps.index and eps[c]]   # 股数必须同季配对
     if not common:
@@ -156,13 +166,18 @@ def normalized_eps(fin: dict[str, pd.DataFrame]) -> dict:
         "shares_quarter": str(c0)[:10],
     }
 
-    eps_end, op_end = pd.Timestamp(max(eps.index)), pd.Timestamp(max(op.index))
+    # `eps_window_end` = `eps_now` 那一期 TTM 的**真实期末**（由 valuation_band 传入）。
+    # 不传时退回「最新一列」——但 `EPS_VINTAGE_LAGGED` 时 eps_now 用的是**上一期** TTM，
+    # 拿最新列去比会报出根本不存在的错配，而该标会让整只票的估值裁决被冻结（假阳性代价很高）。
+    eps_end = pd.Timestamp(eps_window_end) if eps_window_end is not None else pd.Timestamp(max(eps.index))
+    op_end = pd.Timestamp(max(op.index))
     out["normalized_basis"]["eps_window_end"] = str(eps_end)[:10]
     if eps_end != op_end:
         mm = {"op_end": str(op_end)[:10], "eps_end": str(eps_end)[:10],
               "offset_quarters": round((eps_end - op_end).days / 91.31)}
         same = [c for c in op.index if c in eps.index]   # 与营业利润同窗口的报告 EPS
         rep = float(eps[same].sum()) if len(same) == len(op) else 0.0
+        mm["op_pre_tax_aligned"] = True
         if rep > 0:
             mm["eps_ttm_reported_same_window"] = round(rep, 3)
             mm["oneoff_share_same_window"] = round(1 - out["eps_ttm_normalized"] / rep, 3)
@@ -220,7 +235,10 @@ def valuation_band(ticker: str, price_df: pd.DataFrame, fin: dict[str, pd.DataFr
         out["degraded"].append(f"PE_BAND_UNAVAILABLE(pe_days={len(pe_hist)},eps={eps_now})")
 
     # ── 营业利润口径正常化（一次性损益检查，优先于历史带采信）────
-    norm = normalized_eps(fin)
+    eps_win_end = None
+    if not ttm.empty and not asof.empty:
+        eps_win_end = (ttm.attrs.get("period_end") or {}).get(asof.index[-1])
+    norm = normalized_eps(fin, eps_window_end=eps_win_end)
     if norm and norm.get("eps_ttm_normalized", 0) > 0:
         out.update(norm)
         ne = norm["eps_ttm_normalized"]
