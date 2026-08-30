@@ -525,3 +525,170 @@ def write_all_reports(
     written.append(summary_path)
 
     return written
+
+
+# ── 战术 sleeve 结构化快照（供核心 sleeve 交叉引用）─────────────
+
+def _bar_asof(prices: Dict) -> tuple:
+    """全池最后一根**有效**收盘的日期（众数）+ 落后 / 领先于它的票。
+
+    main.py 的 `date_str` 是墙钟日（决定输出目录），core_research.py 用的是最后一根
+    K 线日——两者可以差一天。快照两个都写，交叉检查才有得比。
+
+    ⚠️ `dropna` 不是多余的：Yahoo 会返回**只有 Volume、OHLC 全 NaN** 的未完成尾行，
+    它不会报错、不会缺列，只是把缠论的末笔悄悄改掉（memory: insight_yf_nan_tail_bar
+    —— MSFT 的 b3 与 META 的 s3 曾因此双双消失且无任何告警）。这里顺带报出
+    **哪些票的有效收盘落后于全池最新**，让这种事下次能被看见而不是被平均掉。
+    """
+    last: Dict[str, str] = {}
+    for t, df in (prices or {}).items():
+        if df is None or getattr(df, "empty", True):
+            continue
+        s = df["Close"].dropna()
+        if s.empty:
+            continue
+        last[t] = str(s.index[-1])[:10]
+    if not last:
+        return None, {}, {}
+    # 用**众数**而非 max：Yahoo 的填充是逐票到的，2026-08-29 实测 46 只里只有 2 只
+    # 拿到了 08-28 的 OHLC、其余 44 只还是 NaN 占位。取 max 会把整池的 as-of 定成
+    # 两只票的日期、然后报告 44 只「落后」——正好把主体说成了例外。
+    counts: Dict[str, int] = {}
+    for d in last.values():
+        counts[d] = counts.get(d, 0) + 1
+    asof = max(counts, key=lambda d: (counts[d], d))
+    return (asof,
+            {t: d for t, d in sorted(last.items()) if d < asof},
+            {t: d for t, d in sorted(last.items()) if d > asof})
+
+
+def _chan_buy_allowed(macro: MacroSignalResult) -> list:
+    """战术侧 VIX 四档对缠论买点类型的门控（与 core_research._vix_view 同一函数）。
+
+    ⚠️ 只对战术 sleeve 生效。核心 policy 的扳机明写接受 b1/b2/b3，且核心遇恐慌要
+    加速而非收紧——拿这个门去卡核心方向正好反了（CLAUDE.md R9.7）。
+    """
+    try:
+        from signals.macro.regime import chan_buy_threshold, classify_vix
+        return sorted(chan_buy_threshold(classify_vix(float(macro.vix_level))))
+    except Exception:
+        return []
+
+
+def write_tactical_snapshot(
+    decisions:  Dict[str, StockDecision],
+    macro:      MacroSignalResult,
+    state:      dict,
+    prices:     Dict,
+    date_str:   str,
+    output_dir: Path,
+) -> Path:
+    """写战术 sleeve 结构化快照 output/{date}/tactical_snapshot.json。
+
+    纯落盘，不参与任何判定——`今日操作.md` 是给人看的散文，字段被排版吃掉了，
+    核心侧无法程序化引用。此文件把同一次运行的裁决原样存成结构化数据，
+    供 `core_research.py` 交叉检查（as-of 是否同日、缠论是否两侧一致、
+    两个宏观口径差多少、两本账是否重叠），**不改任何引擎逻辑**。
+
+    ⚠️ 两本账彼此独立：paper `initial_capital` 与真金 `core_ledger.total_capital`
+    各自 $100k、互不相干，合起来不等于一本 70/30。`book` 字段写死这一点。
+    """
+    import json
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    hist = state.get("history", [])
+    cur  = hist[-1] if hist else {}
+
+    rows = {}
+    for t, d in decisions.items():
+        c = d.chan_signal
+        q = d.quant_signal
+        px = prices.get(t) if prices else None
+        close = None
+        if px is not None and not px.empty:
+            s = px["Close"].dropna()
+            close = round(float(s.iloc[-1]), 2) if not s.empty else None
+        rows[t] = {
+            "rating": d.rating,
+            "final_score": round(float(d.final_score), 4),
+            "price": close,
+            "suggested_position": round(float(d.suggested_position), 4),
+            "entry_price_range": [round(float(x), 2) for x in d.entry_price_range],
+            "stop_loss": round(float(d.stop_loss), 2) if d.stop_loss else None,
+            "take_profit": round(float(d.take_profit), 2) if d.take_profit else None,
+            "weights": {"chan": d.chan_weight, "macro": d.macro_weight,
+                        "quant": d.quant_weight},
+            "divergence_applied": bool(d.divergence_applied),
+            "chan_sell_confirmed": bool(d.chan_sell_confirmed),
+            "risk_flags": list(d.risk_flags),
+            "score_reasoning": d.score_reasoning,
+            "chan": ({
+                "score": round(float(c.score), 4),
+                "buy_point": c.buy_point_type,
+                "sell_point": c.sell_point_type,
+                "divergence": bool(c.divergence),
+                "stroke_confirmed": bool(c.stroke_confirmed),
+                "trend_type": c.trend_type,
+                "weekly_trend": c.weekly_trend,
+                "level_resonance": int(c.level_resonance),
+                "confidence": round(float(c.confidence), 3),
+                "atr_pct": round(float(c.atr_pct), 4),
+                "pivot": ({k: round(float(v), 2)
+                           for k, v in (c.current_pivot or {}).items()
+                           if k in ("ZD", "ZG", "mid") and v is not None} or None),
+            } if c is not None else None),
+            "quant_score": round(float(q.score), 4) if q is not None else None,
+            "is_core": t in CORE_HOLDINGS,
+            # 核心名在 main.py 里被排除出买入候选（防同名双重敞口），
+            # 分析照跑——所以它们的评级是**分析结论、不是战术下单指令**。
+            "tactical_tradable": t not in CORE_HOLDINGS,
+        }
+
+    bar_asof, lagging, ahead = _bar_asof(prices)
+    payload = {
+        "run_date": date_str,                    # 墙钟日 = 输出目录名
+        "bar_asof": bar_asof,                    # 最后一根有效 K 线日（全池最新）
+        # 有效收盘落后于全池最新的票：多半是 Yahoo 的 NaN 尾行占位（有 Volume 无 OHLC）。
+        # 它会静默改写缠论末笔，故必须逐名可见，不可被"全池 as-of"一个数掩盖。
+        "bar_lagging": lagging,
+        # 反向：个别票已拿到更新的 OHLC 而全池还没（Yahoo 逐票填充）。
+        # 它们的价位比 `bar_asof` 新一天，不可与其余名并列比较。
+        "bar_ahead": ahead,
+        "generated_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+        "sleeve": "tactical",
+        "book": {
+            "kind": "paper",                     # 模拟盘，与真金核心台账互不相干
+            "initial_capital": state.get("initial_capital"),
+            "equity": cur.get("equity"),
+            "cash": cur.get("cash"),
+            "market_value": cur.get("market_value"),
+            "n_positions": cur.get("n_positions"),
+            "total_pnl_pct": cur.get("total_pnl_pct"),
+            "max_exposure_frac": MAX_PORTFOLIO_EXPOSURE,
+            "positions": state.get("positions", {}),
+        },
+        "macro": {
+            # ⚠️ 这是战术侧的 35% macro_score（需全池价格 + 桶强度才算得出），
+            # **不是**核心侧的 VIX 档位口径。两者不可互换，见 CLAUDE.md R9.7。
+            "score": round(float(macro.score), 4),
+            "vix": round(float(macro.vix_level), 2),
+            "regime": macro.vix_regime,
+            "position_limit": macro.position_limit,
+            "chan_buy_allowed": _chan_buy_allowed(macro),
+            "yield_spread": round(float(macro.yield_spread), 3),
+            "bucket_scores": {k: round(float(v), 3)
+                              for k, v in (macro.bucket_scores or {}).items()},
+            "swing_timing": ({"bottom_state": macro.swing_timing.bottom_state,
+                              "top_state": macro.swing_timing.top_state,
+                              "vix_tier": macro.swing_timing.vix_tier,
+                              "suggested_tranche": macro.swing_timing.suggested_tranche}
+                             if macro.swing_timing is not None else None),
+            "degraded": list(macro.degraded or []),
+            "reasoning": macro.reasoning,
+        },
+        "decisions": rows,
+    }
+    path = output_dir / "tactical_snapshot.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+                    encoding="utf-8")
+    return path

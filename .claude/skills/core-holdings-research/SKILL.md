@@ -1,6 +1,6 @@
 ---
 name: core-holdings-research
-description: R9 核心持仓（70% 长持 sleeve：NVDA/AAPL/GOOGL/MSFT/AMZN/META/QQQ）每日深度研究——读官方披露与财务趋势判 thesis、对齐公允价带、给底仓累积/增强层高抛低吸的可执行择时建议与目标价位。产出 output/{date}/核心持仓研究.md。
+description: R9 核心持仓（70% 长持 sleeve：NVDA/AAPL/GOOGL/MSFT/AMZN/META/QQQ）每日深度研究——读官方披露与财务趋势判 thesis、对齐公允价带、给底仓累积/增强层高抛低吸的可执行择时建议与目标价位。产出 output/{date}/核心持仓研究.md；战术侧已跑过时另出 统一操作指引.md（短线×长线合并执行单）。
 ---
 
 # 核心持仓每日研究（R9.4）
@@ -14,8 +14,19 @@ description: R9 核心持仓（70% 长持 sleeve：NVDA/AAPL/GOOGL/MSFT/AMZN/MET
 ### 1. 预取结构化输入
 
 ```bash
-python core_research.py
+python main.py            # 战术 sleeve（短线）；已跑过当天可跳过
+python core_research.py   # 核心 sleeve（长线）预取
 ```
+
+**先跑 `main.py` 再跑 `core_research.py`**：前者会落一份 `output/{run_date}/tactical_snapshot.json`
+（同一次运行的战术裁决的结构化副本），后者会自动找到它并挂进 `core_inputs.json` 的
+`tactical` 块（见 §2c）。没跑也不会报错——`tactical` 块整块缺席、打
+`TACTICAL_SNAPSHOT_MISSING`，报告退回纯长线口径并注明。
+
+⚠️ **两个日期不是一回事，别拿目录名当 as-of**：`main.py` 的输出目录是**墙钟日**
+（周末跑就是周末的日期），`core_inputs.json` 的 `asof` 是**最后一根有效 K 线日**。
+两者差 1~3 天是正常的。真正要对齐的是 `tactical.bar_asof` 与 `asof`
+（预取层已代码化为 `asof_aligned`）。
 
 产出 `output/{date}/core_inputs.json`（date = 最新完成交易日）。读取整个 json。
 新增三块（2026-08-28）：`portfolio.macro`（VIX 档位，见 §3.8）、
@@ -75,6 +86,59 @@ python core_research.py
   用户本月没投——报告须写「本月已投无法核算（存量 fill 无日期）」。
 - 带 `POLICY:TARGET_SUM_MISMATCH` 时逐名目标之和 ≠ `core_target_usd`，两个口径会各说各话 →
   优先报此冲突并请用户校正，不要挑一个口径自行其是。
+
+### 2c. 战术 sleeve 对账（`tactical` 块，缺席则退回纯长线口径）
+
+`core_inputs.json` 的 `tactical` 块是**同一个交易日**战术侧裁决的结构化副本
+（`main.py` 写的 `tactical_snapshot.json`）。它的存在只为一件事：让短线与长线
+**在同一份输入上对账**，然后在同一张表里呈现。
+
+#### ⚠️⚠️ 合并输入与呈现，**绝不合并裁决**
+
+两个 sleeve 是**故意反向**的（CLAUDE.md R9.7），把它们平均掉就等于两条都废掉：
+
+| | 战术 sleeve | 核心 sleeve |
+|---|---|---|
+| 持有期 | 数周 | 数年 |
+| 结构 vs 基本面冲突 | 结构优先（0.70×chan） | **thesis 优先**（红旗否决买点） |
+| VIX 升高 | **节流**（仓位上限下调、买点门槛收紧） | **加速**（恐慌是加仓窗口） |
+| 宏观口径 | 35% `macro_score`（全池价格+桶强度） | VIX 四档（`portfolio.macro`） |
+| 资金 | paper 模拟盘 $100k | 真金 `core_ledger.total_capital` |
+
+因此**禁止**：把战术评级当成核心的加减仓依据；把 `macro_score` 代进核心；
+造任何跨 sleeve 的合成分；用一侧的结论去改写另一侧。
+**允许且必须做**的只有对账 + 并列呈现。
+
+#### 六只核心名在战术侧的评级 = 分析结论，不是下单指令
+
+`main.py` 把 `CORE_HOLDINGS` 排除出战术买入候选（防同名双重敞口），所以
+`core_names[t].tactical_tradable` 恒为 `false`。它们的 `rating` / `final_score`
+是**照跑出来供核心择时参考的分析**，报告须写明这一点——不得写成
+「战术侧给 MSFT Hold，所以核心也观望」。核心的动作只能由 §3.8 三轴裁决给出。
+（QQQ 是 benchmark 不是扫描池成员，通常不出现在 `core_names` 里，属正常。）
+
+#### 四项交叉检查（逐条读，命中即写进报告）
+
+1. **`asof_aligned`** —— `tactical.bar_asof` 是否等于 `asof`。
+   `false` ⇒ 打 `TACTICAL_ASOF_MISMATCH`，**两侧价位与信号不可直接并列**，
+   报告须写明各自是哪一天的收盘。
+2. **`core_names[t].chan_agrees_with_core`** —— 六只核心名的缠论，两条管线各算了一遍。
+   两侧**共用同一份价格缓存**（`get_price` 同 key、同 800 天窗口），
+   所以正常必须完全一致；出现 `false`（附 `chan_diffs`）⇒ 打 `TACTICAL_CHAN_DISAGREE`
+   ⇒ **先查清再引用任一侧的结构位**，不要挑一个看着顺眼的用。
+3. **`TACTICAL_BAR_LAGGING` / `PRICE_BAR_OFFSET`** —— 这两条抓的是**对账抓不到的那类错**：
+   两侧共用缓存，所以数据缺陷会**同时打中两边**，此时「两侧一致」恰恰是假安慰
+   （2026-08-28 的 NaN 尾行事故即如此：MSFT 的 b3 与 META 的 s3 在两边一起消失，
+   对账全绿）。命中即说明那些名的价位/末笔不是 as-of 当日的。
+4. **`book.positions` ∩ `CORE_HOLDINGS`** —— 命中即 `TACTICAL_CORE_OVERLAP`：
+   同名双重敞口，`main.py` 的核心名排除本该防住，须查历史遗留仓。
+
+#### 两本账彼此独立（`book.independent_from_core = true`）
+
+paper 的 `initial_capital` 与真金 `core_ledger.total_capital` **各自 $100k、互不相干**，
+**合起来不是一本 70/30 的账**：战术的 `max_exposure_frac=0.30` 是 paper **自身权益**的 30%，
+核心的 70% 是真金 `total_capital` 的 70%。报告里两侧仓位**必须分列并标注资金账户**，
+**禁止**相加成一个「总仓位」——那个数没有对应任何一笔真实资金。
 
 ### 3. 逐核心股研究（QQQ 除外的 6 只）
 
@@ -369,6 +433,46 @@ QQQ 无 thesis 风险、无一次性损益问题、无估值分位样本问题�
 
 写入 `output/{date}/核心持仓研究.md`（date 与 core_inputs.json 相同）。
 
+### 6. 统一操作指引（短线 + 长线合成一张表）
+
+`tactical` 块存在时，**除 `核心持仓研究.md` 外另写一份**
+`output/{asof}/统一操作指引.md`（asof 与 `core_inputs.json` 相同）。
+
+它解决的问题：`今日操作.md`（短线）与 `核心持仓研究.md`（长线）此前是两份互不引用的
+结论，读者要自己在脑子里合并——而两个 sleeve 恰恰对同一个 VIX、同一个缠论信号
+**要求相反的动作**，靠人脑合并正是最容易出错的地方。这份文件把两侧摆到一张表上，
+**每一行都钉死它属于哪个 sleeve、哪个持有期、哪本账**，合并的是呈现，不是判断。
+
+**结构（五节，顺序固定）**：
+
+- **§A 今日一句话** —— 两侧各一句：短线做什么、长线做什么。若两侧动作看似矛盾
+  （如战术在减、核心在加），**必须显式说明这是设计使然并给出理由**（持有期不同），
+  不得含糊过去。
+- **§B 对账栏** —— 一个小表，四项交叉检查（§2c）逐条报 ✅/⚠️ + 命中详情：
+  as-of 对齐 · 缠论一致 · 数据尾行 · 账户重叠。任一 ⚠️ 时，本文件后续所有并列
+  比较都须带上这个限定，不得只在这里提一句就当没发生。
+- **§C 短线（战术 sleeve · paper $100k）** —— **原样转录**
+  `tactical.actionable` 与 `tactical.book`，不重新解释、不加自己的判断、不改评级。
+  表列：票 · 评级 · final_score · 现价 · 入场区间 · 止损 · 止盈 · 建议仓位 · 风控标。
+  下附 paper 持仓与 `max_exposure_frac`（注明「占 paper 自身权益」）。
+  ⚠️ 六只核心名不出现在这一节（`tactical_tradable=false`）。
+- **§D 长线（核心 sleeve · 真金）** —— 逐名一行的三轴裁决结论（§3.8），
+  层写「底仓·基线」/「底仓·加速器」/「增强层」，附 `baseline_plan` 的摊额与股数。
+  每名后括注它在战术侧的评级 + 一句 **「（仅供参照，核心动作不由此决定）」**。
+- **§E 合并仓位视图** —— **两本账分列，绝不相加**：
+  | sleeve | 资金账户 | 已投/权益 | 目标 | 今日净动作 |
+  表下必须有一句：**这两行不可相加**，paper 与真金是两笔独立的钱，
+  30%/70% 各自对自己的本金而言。
+
+**写作纪律**：
+- 这份文件**不产生任何新结论**。每一个数字都必须能追回 `tactical_snapshot.json` 或
+  `core_inputs.json` 的具体字段；短线一侧照抄，长线一侧引用 `核心持仓研究.md` 的裁决。
+  若发现两侧结论有冲突，**报告冲突本身**（并注明这是设计使然还是数据问题），
+  **不做仲裁、不取平均、不造合成评级**。
+- 篇幅控制在一屏可读——深度分析留在 `核心持仓研究.md`，这份是执行单。
+- `tactical` 块缺席时**不写这份文件**，只在 `核心持仓研究.md` 顶部注明
+  「战术侧未运行（`TACTICAL_SNAPSHOT_MISSING`），本次仅长线口径」。
+
 ## 纪律（不可违背）
 
 - **advisory only**：不改任何引擎代码、不碰 paper 组合、不改缠论 55% 本体。
@@ -377,3 +481,6 @@ QQQ 无 thesis 风险、无一次性损益问题、无估值分位样本问题�
 - **可回溯**：每条建议注明触发依据（哪条 filing / 哪个指标 / 哪个价位关系），非黑箱。
 - swing<hold 教训（memory: insight_backtest_exit_faithful）：底仓绝不做波段；波段仅限
   增强层且底仓下限硬约束。
+- **跨 sleeve 只对账不仲裁**：两个 sleeve 对 VIX 与「结构 vs 基本面」的方向**故意相反**，
+  合并它们的裁决等于两条都废掉。可以并列呈现、可以互为参照、可以报告冲突，
+  **不可加权、不可取平均、不可让一侧改写另一侧、不可把两本账的仓位相加**。

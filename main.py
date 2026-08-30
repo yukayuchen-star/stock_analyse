@@ -34,7 +34,8 @@ from decision.hysteresis         import apply_hysteresis
 from decision.portfolio_core     import (
     Signal, load_portfolio, save_portfolio, update_portfolio,
 )
-from report.report_writer        import write_all_reports, write_daily_action_sheet
+from report.report_writer        import (write_all_reports, write_daily_action_sheet,
+                                          write_tactical_snapshot)
 from backtest.engine             import run_all_backtests
 from backtest.report             import write_backtest_report
 from backtest.forward_tracker    import (
@@ -658,6 +659,12 @@ def run(non_interactive: bool = False,
     # 精简每日执行单（live 每日照此下单）：判断 + 今日买卖点 + 仓位
     action_path = write_daily_action_sheet(decisions, macro, portfolio, date_str, output_dir)
     logger.info(f"  已写入: {action_path}")
+
+    # 结构化快照：同一次运行的裁决存成 json，供核心 sleeve（core_research.py）
+    # 交叉引用——`今日操作.md` 是散文，字段被排版吃掉，程序读不出来。
+    snap_path = write_tactical_snapshot(decisions, macro, portfolio, prices,
+                                        date_str, output_dir)
+    logger.info(f"  已写入: {snap_path}")
 
     logger.info("── 量化评分排行（按 score 降序）──")
     for r in sorted(quant_signals.values(), key=lambda x: x.score, reverse=True):

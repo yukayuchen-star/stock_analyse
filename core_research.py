@@ -527,6 +527,159 @@ def _entry_window(chan, piv: dict, price: float | None) -> dict:
     return out
 
 
+TACTICAL_MAX_AGE_DAYS = 7      # 战术快照比 asof 旧过此天数即弃用（宁可缺席，不可拿旧裁决拼今天）
+TACTICAL_MAX_FUTURE_DAYS = 4   # 目录日=墙钟日，正常会比 asof 晚（周末/NaN 尾行），故须留出前瞻窗口
+
+
+def _find_tactical(asof: str) -> tuple[dict | None, str | None]:
+    """找最近一份战术快照 output/{date}/tactical_snapshot.json。
+
+    ⚠️ 目录名是**墙钟日**（main.py 的 `today_str()`），核心侧的 `asof` 是**最后一根
+    有效 K 线日** —— 战术目录**正常地会比 core 的 asof 晚 1~3 天**（周末、或核心名
+    命中 NaN 尾行）。所以不能按「目录日 ≤ asof」筛，那会把当天刚跑出来的快照当成
+    未来数据丢掉。判定新鲜度看快照里的 `bar_asof`，不看目录名。
+
+    优先取 `bar_asof == asof` 的那一份（真正同一根 K 线）；没有则取目录日最新的一份，
+    由调用方打 `TACTICAL_ASOF_MISMATCH`。都没有则返回 (None, None) ——
+    **缺席比拼凑好**：核心报告会退回纯核心口径并注明战术侧未运行。
+    """
+    root = Path("output")
+    if not root.is_dir():
+        return None, None
+    cands: list[tuple[str, Path, dict]] = []
+    for d in sorted(root.iterdir(), reverse=True):
+        f = d / "tactical_snapshot.json"
+        if not f.is_file():
+            continue
+        try:
+            age = (pd.Timestamp(asof) - pd.Timestamp(d.name)).days
+        except Exception:
+            continue
+        if age > TACTICAL_MAX_AGE_DAYS or age < -TACTICAL_MAX_FUTURE_DAYS:
+            continue
+        try:
+            cands.append((d.name, f, json.loads(f.read_text(encoding="utf-8"))))
+        except Exception as e:
+            logger.warning(f"[Core] 战术快照解析失败 {f}: {e}")
+    if not cands:
+        return None, None
+    for _, f, snap in cands:
+        if snap.get("bar_asof") == asof:
+            return snap, str(f)
+    _, f, snap = cands[0]
+    return snap, str(f)
+
+
+def _tactical_link(asof: str, records: dict) -> tuple[dict, list[str]]:
+    """把同一次交易日的战术 sleeve 裁决挂进核心输入，并做四项交叉检查。
+
+    为什么要这一块（2026-08-29 用户提出）：两条管线本来各写各的报告——`今日操作.md`
+    给短线、`核心持仓研究.md` 给长线，读者要自己在脑子里合并两份结论。但两者其实
+    **共用同一份价格缓存**（`get_price` 同 key、同 800 天窗口），六只核心名在战术侧
+    也**已经全量算过一遍缠论**。不合并的代价不是重复劳动，是**两份结论可以静默不一致**
+    而没人发现（2026-08-28 的 NaN 尾行事故就同时打中了两侧，MSFT 的 b3 在两边一起消失）。
+
+    ⚠️ **只合并输入与呈现，绝不合并裁决**：两个 sleeve 对 VIX 的方向相反、对
+    「结构 vs 基本面」冲突的优先级相反、持有期差两个数量级。这里做的是**对账**
+    （as-of 是否同日 / 缠论是否一致 / 两个宏观口径差多少 / 两本账是否重叠），
+    不是投票，更不产生任何合成评级。
+    """
+    snap, src = _find_tactical(asof)
+    if snap is None:
+        return {}, [f"TACTICAL_SNAPSHOT_MISSING(近 {TACTICAL_MAX_AGE_DAYS} 天内无 "
+                    f"tactical_snapshot.json → 本次报告只有长线一侧；"
+                    f"先跑 `python main.py` 再跑本预取即可合并)"]
+
+    flags: list[str] = []
+    bar = snap.get("bar_asof")
+    if bar and bar != asof:
+        flags.append(f"TACTICAL_ASOF_MISMATCH(战术侧最后 K 线 {bar} ≠ 核心侧 {asof}"
+                     f" → 两侧看的不是同一天，价位与信号不可直接并列)")
+    run_date = snap.get("run_date")
+    lag = {t: d for t, d in (snap.get("bar_lagging") or {}).items() if t in CORE_HOLDINGS}
+    if lag:
+        flags.append("TACTICAL_BAR_LAGGING(" + ", ".join(f"{t}@{d}" for t, d in lag.items())
+                     + " 在战术侧的最后有效收盘也落后于全池 —— 两条管线共用同一份价格缓存，"
+                     "所以这是**同一个数据缺陷同时打中两侧**，不是两侧不一致；"
+                     "两边一起错时对账是看不出来的，只能靠这一条)")
+
+    # ── 六只核心名：战术侧已算过一遍缠论，逐名对账 ──
+    dec = snap.get("decisions", {}) or {}
+    core_rows: dict[str, dict] = {}
+    for t in CORE_HOLDINGS:
+        row = dec.get(t)
+        if not row:
+            continue
+        tc = row.get("chan") or {}
+        cc = (records.get(t, {}) or {}).get("technical") or {}
+        diffs = []
+        if cc:
+            for tk, ck in (("buy_point", "buy_point"), ("sell_point", "sell_point"),
+                           ("stroke_confirmed", "stroke_confirmed")):
+                if tc.get(tk) != cc.get(ck):
+                    diffs.append(f"{tk}: 战术={tc.get(tk)} 核心={cc.get(ck)}")
+            ts, cs = tc.get("score"), cc.get("chan_score")
+            if ts is not None and cs is not None and abs(float(ts) - float(cs)) > 0.005:
+                diffs.append(f"score: 战术={ts} 核心={cs}")
+        core_rows[t] = {
+            "rating": row.get("rating"),
+            "final_score": row.get("final_score"),
+            "price": row.get("price"),
+            "suggested_position": row.get("suggested_position"),
+            "risk_flags": row.get("risk_flags"),
+            "score_reasoning": row.get("score_reasoning"),
+            "quant_score": row.get("quant_score"),
+            "chan": tc or None,
+            # 核心名被 main.py 排除出战术买入候选 → 这个评级是**分析结论**，
+            # 不是一条可下单的战术指令。核心侧的动作只能由三轴裁决给出。
+            "tactical_tradable": bool(row.get("tactical_tradable")),
+            "chan_agrees_with_core": (not diffs) if cc else None,
+            "chan_diffs": diffs or None,
+        }
+        if diffs:
+            flags.append(f"TACTICAL_CHAN_DISAGREE({t}: " + "; ".join(diffs) +
+                         " → 两侧共用同一份价格缓存，出现分歧即为数据或时点漂移，"
+                         "须先查清再引用任一侧结构位)")
+
+    # ── 战术侧今日可执行行（非核心名）：短线动作原样透传，不作任何改写 ──
+    _ACT = {"Buy", "Overweight", "Sell", "Underweight"}
+    actionable = [
+        {"ticker": t, "rating": r.get("rating"), "final_score": r.get("final_score"),
+         "price": r.get("price"), "suggested_position": r.get("suggested_position"),
+         "entry_price_range": r.get("entry_price_range"), "stop_loss": r.get("stop_loss"),
+         "take_profit": r.get("take_profit"), "risk_flags": r.get("risk_flags"),
+         "chan_sell_confirmed": r.get("chan_sell_confirmed")}
+        for t, r in sorted(dec.items(), key=lambda kv: -(kv[1].get("final_score") or 0))
+        if r.get("rating") in _ACT and r.get("tactical_tradable")
+    ]
+
+    book = snap.get("book", {}) or {}
+    positions = book.get("positions", {}) or {}
+    overlap = [t for t in positions if t in CORE_HOLDINGS]
+    if overlap:
+        flags.append(f"TACTICAL_CORE_OVERLAP({','.join(overlap)} 同时在 paper 持仓与核心池 "
+                     f"→ 同名双重敞口，main.py 的核心名排除本应防住这个，须查历史遗留仓)")
+
+    tmacro = snap.get("macro", {}) or {}
+    link = {
+        "source": src,
+        "run_date": run_date,
+        "bar_asof": bar,
+        "asof_aligned": (bar == asof),
+        "generated_at": snap.get("generated_at"),
+        # ⚠️ 两本账彼此独立，各自 $100k，**合起来不是一本 70/30 的账**。
+        # 战术 30% 是 paper 自身权益的 30%，核心 70% 是真金 total_capital 的 70%。
+        "book": {**{k: v for k, v in book.items() if k != "positions"},
+                 "positions": positions,
+                 "independent_from_core": True},
+        # 战术的 35% macro_score ≠ 核心的 VIX 档位口径，两者只可并列不可互换。
+        "macro": tmacro,
+        "core_names": core_rows,
+        "actionable": actionable,
+    }
+    return link, flags
+
+
 def _pct(v) -> str:
     """百分比格式化；None/NaN（Yahoo 缺 surprisePercent）返回「未提供」而不是抛 TypeError
     或印出 `nan%`。缺失说「未提供」，不伪装成一个数。"""
@@ -557,11 +710,26 @@ def main() -> int:
     start = (datetime.now() - timedelta(days=_PRICE_DAYS)).strftime("%Y-%m-%d")
 
     prices = {t: yfs.get_price(t, start, end) for t in CORE_HOLDINGS}
-    date_str = None
-    for df in prices.values():
-        if df is not None and not df.empty:
-            date_str = pd.Timestamp(df.index[-1]).strftime("%Y-%m-%d")
-            break
+    # as-of = 最后一根**有效**收盘（取全核心池最新），不是原始最后一行。
+    # ⚠️ Yahoo 会返回只有 Volume、OHLC 全 NaN 的未完成尾行（memory:
+    # insight_yf_nan_tail_bar）。用原始 index[-1] 会让 `asof` 比价格晚一天——
+    # 报告日期与 `price` 字段来自不同的两天，且与战术侧 `bar_asof` 无谓打架。
+    _last_valid = {}
+    for t, df in prices.items():
+        if df is None or df.empty:
+            continue
+        cl = df["Close"].dropna()
+        if not cl.empty:
+            _last_valid[t] = pd.Timestamp(cl.index[-1]).strftime("%Y-%m-%d")
+    # 用**众数**而非 max：Yahoo 的填充是逐票到的，个别票先拿到新 OHLC 时取 max
+    # 会把整池的 as-of 定成那一两只票的日期、再把其余全体报成「落后」。
+    _counts: dict[str, int] = {}
+    for d in _last_valid.values():
+        _counts[d] = _counts.get(d, 0) + 1
+    date_str = max(_counts, key=lambda d: (_counts[d], d)) if _counts else None
+    # 有效收盘与 as-of 不同的核心名：其 price/缠论末笔不是 as-of 当日的，须逐名可见
+    price_offbar = {t: d for t, d in sorted(_last_valid.items()) if d != date_str} \
+        if date_str else {}
     if date_str is None:
         logger.error("[Core] 全部核心票无价格数据，退出")
         return 1
@@ -725,6 +893,12 @@ def main() -> int:
         "cost_basis_complete": pending == 0,
         "cost_pending_shares": pending,
     }
+    if price_offbar:
+        degraded.append(
+            "PRICE_BAR_OFFSET(" + ", ".join(f"{t}@{d}" for t, d in price_offbar.items())
+            + f" 的最后有效收盘 ≠ as-of {date_str} —— 多为 Yahoo 的 NaN 尾行占位"
+            "（有 Volume 无 OHLC，逐票填充故快慢不一），它会**静默改写缠论末笔**；"
+            "这些名的价位与结构位不是 as-of 当日的，不得与其他名并列比较)")
     macro, mflags = _vix_view(cache)
     if macro:
         portfolio["macro"] = macro
@@ -746,6 +920,10 @@ def main() -> int:
                 f"POLICY:TARGET_SUM_MISMATCH(逐名合计 {policy['target_sum_usd']} "
                 f"≠ core_target_usd {core_target_usd})")
 
+    # ── 战术 sleeve 对账（缺席则整块不出现，报告退回纯核心口径）──
+    tactical, tflags = _tactical_link(date_str, records)
+    degraded += tflags
+
     out_dir = Path("output") / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -755,6 +933,8 @@ def main() -> int:
         "holdings": records,
         "degraded": sorted(set(degraded)),
     }
+    if tactical:
+        payload["tactical"] = tactical
     out_path = out_dir / "core_inputs.json"
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str),
                         encoding="utf-8")
