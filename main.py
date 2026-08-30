@@ -267,6 +267,50 @@ def _merge_watchlist(
     return changes
 
 
+def _merge_held_positions(
+    core_pool: List[str],
+    dynamic_pool: List[str],
+    buckets: Dict[str, List[str]],
+    date_str: str,
+) -> List[PoolChange]:
+    """paper 持仓票强制并入 dynamic_pool（就地修改），返回变更记录。
+
+    **为什么必须强制**（2026-08-29 实测发现）：`_run_portfolio` 只为 `decisions` 里的票
+    造 `Signal`，而 `decisions` 只覆盖 `final_pool`。持仓票一旦轮出扫描池就**没有 Signal**，
+    于是 `update_portfolio` 的卖出循环命中
+    `if sig is None or sig.price <= 0: continue  # 当日无数据，保持持仓` 直接跳过它——
+    **结构止损从此不再被评估，卖点信号也发不出来**，仓位被无限期持有且按成本计价。
+    实测 TKO（2026-08-14 买入）即处于此状态：止损 $180.06 从未被检验过。
+
+    风控优先于选股：**持仓意味着有钱在里面，必须每天被看一眼**，
+    哪怕它已不再是一个值得新建仓的标的。
+
+    ⚠️ 副作用（有意为之，非疏漏）：入池后该票也会正常参与买入候选——
+    与 `_merge_watchlist` 同构，且 `_run_portfolio` 本就允许对已持仓票按新买点分批加仓
+    （`tranche_fraction<1.0` 的金字塔加码），故不额外设限，行为与池内其他票一致。
+    """
+    changes: List[PoolChange] = []
+    try:
+        state = load_portfolio(_PORTFOLIO_PATH, PORTFOLIO_INITIAL_CAPITAL)
+        held = sorted(state.get("positions", {}).keys())
+    except Exception as e:                    # 台账损坏不应阻断整轮扫描
+        logger.warning(f"[Pool] 读取 paper 持仓失败，跳过持仓票强制入池: {e}")
+        return changes
+    for ticker in held:
+        if ticker in core_pool or ticker in dynamic_pool:
+            continue
+        dynamic_pool.append(ticker)
+        buckets.setdefault("custom", []).append(ticker)
+        changes.append(PoolChange(
+            date=date_str, action="add", ticker=ticker,
+            reason="paper 持仓票强制入池（保证结构止损与卖点每日被评估）",
+            source="held-position",
+        ))
+        logger.warning(f"  + {ticker} ← paper 持仓但已轮出扫描池 → 强制入池 "
+                       f"[custom]（否则其止损不会被评估）")
+    return changes
+
+
 def _non_interactive_pool_update(
     core_pool: List[str],
     dynamic_pool: List[str],
@@ -439,6 +483,8 @@ def run(non_interactive: bool = False,
     dynamic_pool = load_dynamic_pool()
     buckets      = copy.deepcopy(BUCKETS)
     wl_changes   = _merge_watchlist(core_pool, dynamic_pool, buckets, date_str)
+    # 持仓票强制入池须在 watchlist 之后、扫描之前——它是风控前提，不是选股偏好
+    wl_changes  += _merge_held_positions(core_pool, dynamic_pool, buckets, date_str)
     current_pool = sorted(set(core_pool) | set(dynamic_pool))
     logger.info(f"启动池: core={len(core_pool)} dynamic={len(dynamic_pool)} 合并={len(current_pool)}")
 

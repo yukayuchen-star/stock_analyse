@@ -34,6 +34,10 @@ class StockDecision:
     entry_price_range:  Tuple[float, float] = (0.0, 0.0)
     stop_loss:          float = 0.0
     take_profit:        float = 0.0
+    # 信号日收盘价。make_decision 本来就算了它（用于 risk_overlay），此前却没往外带，
+    # 于是 report_writer 的 `getattr(d, "current_price", 0)` 恒取到 0、
+    # 「今日操作.md」持仓表的现价/浮盈两列永远回落成买入价/+0.0%（2026-08-29 修）。
+    current_price:      float = 0.0
 
     # 原始信号引用
     chan_signal:  Optional[ChanSignalResult]  = None
@@ -90,6 +94,7 @@ def make_decision(
         entry_price_range=risk.entry_price_range,
         stop_loss=risk.stop_loss,
         take_profit=risk.take_profit,
+        current_price=current_price,
         chan_signal=chan,
         quant_signal=quant,
         macro_signal=macro,

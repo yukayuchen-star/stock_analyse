@@ -447,15 +447,29 @@ def _daily_action_sheet(
               f"- 持仓上限 {MAX_PORTFOLIO_EXPOSURE:.0%}（战术 sleeve）→ 剩余可加仓额度约 **${max(0.0, MAX_PORTFOLIO_EXPOSURE*equity - mv):,.0f}**", ""]
     if positions:
         L += ["| 代码 | 买入价 | 现价 | 浮盈 | 股数 | 市值 | 止损 |", "|--|--|--|--|--|--|--|"]
-        price_now = {c: (float(decisions[c].current_price)
-                         if c in decisions and getattr(decisions[c], "current_price", 0) else pos["cost_price"])
-                     for c, pos in positions.items()}
+        # 取信号日收盘价；取不到就**如实留空**，不再拿成本价冒充现价。
+        # 旧写法 `if ... getattr(d, "current_price", 0) else pos["cost_price"]` 在
+        # StockDecision 尚无该字段时恒走 else 分支 → 每一行都显示「现价=买入价、浮盈 +0.0%」，
+        # 一个看着正常、实则从不更新的假数（2026-08-29 修，同时补齐了 current_price 字段）。
+        price_now = {c: float(getattr(decisions[c], "current_price", 0) or 0)
+                     for c in positions if c in decisions}
+        missing = [c for c in positions if not price_now.get(c)]
         for code, pos in sorted(positions.items(), key=lambda kv: kv[1]["buy_date"]):
-            px = price_now.get(code, pos["cost_price"])
-            pnl = (px - pos["cost_price"]) / pos["cost_price"] if pos["cost_price"] else 0.0
-            sl = f"{pos['stop_loss']:.2f}" if pos.get("stop_loss") else "—"
-            L.append(f"| {code} | {pos['cost_price']:.2f} | {px:.2f} | {pnl:+.1%} | "
-                     f"{pos['shares']} | ${pos['shares']*px:,.0f} | {sl} |")
+            px   = price_now.get(code) or 0.0
+            cost = pos["cost_price"]
+            sl   = f"{pos['stop_loss']:.2f}" if pos.get("stop_loss") else "—"
+            if px:
+                pnl = (px - cost) / cost if cost else 0.0
+                px_s, pnl_s, mv_s = f"{px:.2f}", f"{pnl:+.1%}", f"${pos['shares']*px:,.0f}"
+            else:
+                # 无当日价：市值按成本计（与 portfolio_core._snapshot 的兜底同口径），并标注
+                px_s, pnl_s, mv_s = "—", "—", f"${pos['shares']*cost:,.0f}*"
+            L.append(f"| {code} | {cost:.2f} | {px_s} | {pnl_s} | "
+                     f"{pos['shares']} | {mv_s} | {sl} |")
+        if missing:
+            L.append("")
+            L.append(f"> \\* {'、'.join(missing)} 无当日价（不在本次扫描池或取价失败），"
+                     f"市值按**成本价**计，浮盈无法计算——与上方总权益口径一致。")
         L.append("")
     else:
         L += ["> 当前空仓。", ""]
