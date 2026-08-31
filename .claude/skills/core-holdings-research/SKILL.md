@@ -117,6 +117,21 @@ python core_research.py   # 核心 sleeve（长线）预取
 「战术侧给 MSFT Hold，所以核心也观望」。核心的动作只能由 §3.8 三轴裁决给出。
 （QQQ 是 benchmark 不是扫描池成员，通常不出现在 `core_names` 里，属正常。）
 
+#### `tactical_tradable=false` 的第二种成因：强制入池的持仓票
+
+`decisions[t].no_buy_reason` 区分两者：
+- `"core-holding"` —— 六只核心名，如上。
+- `"held-forced-into-pool"` —— paper 已持仓、但已被扫描池轮出的票。它是**为风控被拉回来的**
+  （不入池则结构止损与卖点根本不会被评估），**只分析、不进买入候选**。
+
+对这类票，报告须把两件事分开写：
+- ✅ **卖出侧照常生效**：`stop_loss` / 卖点 / 评级转 Sell 都会真的执行——写进 §C 的持仓行。
+- ❌ **买入侧一律不动**：即便 `rating` 是 Buy/Overweight（此时 `risk_flags` 含 `HELD_NO_ADD`），
+  也**不得**在 §C 写成加仓建议。评级说的是「这只票现在什么状态」，不是「可以买」。
+
+**为什么必须显式写**：评级说买、账本不买、报告不提，就是一次静默背离——
+与「持仓票没有 Signal 所以止损从不被检验」是同一类缺陷，只是方向相反。
+
 #### 四项交叉检查（逐条读，命中即写进报告）
 
 1. **`asof_aligned`** —— `tactical.bar_asof` 是否等于 `asof`。
@@ -455,7 +470,9 @@ QQQ 无 thesis 风险、无一次性损益问题、无估值分位样本问题�
   `tactical.actionable` 与 `tactical.book`，不重新解释、不加自己的判断、不改评级。
   表列：票 · 评级 · final_score · 现价 · 入场区间 · 止损 · 止盈 · 建议仓位 · 风控标。
   下附 paper 持仓与 `max_exposure_frac`（注明「占 paper 自身权益」）。
-  ⚠️ 六只核心名不出现在这一节（`tactical_tradable=false`）。
+  ⚠️ `tactical_tradable=false` 的票不出现在**加仓建议**里——六只核心名（`no_buy_reason=
+  "core-holding"`）整行不出现；强制入池的持仓票（`"held-forced-into-pool"`）只出现在
+  **持仓与止损行**，其评级即便是 Buy 也不得写成加仓（见 §2c）。
 - **§D 长线（核心 sleeve · 真金）** —— 逐名一行的三轴裁决结论（§3.8），
   层写「底仓·基线」/「底仓·加速器」/「增强层」，附 `baseline_plan` 的摊额与股数。
   每名后括注它在战术侧的评级 + 一句 **「（仅供参照，核心动作不由此决定）」**。

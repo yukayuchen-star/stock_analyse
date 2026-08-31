@@ -272,8 +272,8 @@ def _merge_held_positions(
     dynamic_pool: List[str],
     buckets: Dict[str, List[str]],
     date_str: str,
-) -> List[PoolChange]:
-    """paper 持仓票强制并入 dynamic_pool（就地修改），返回变更记录。
+) -> Tuple[List[PoolChange], List[str]]:
+    """paper 持仓票强制并入 core_pool（就地修改），返回 (变更记录, 强制入池名单)。
 
     **为什么必须强制**（2026-08-29 实测发现）：`_run_portfolio` 只为 `decisions` 里的票
     造 `Signal`，而 `decisions` 只覆盖 `final_pool`。持仓票一旦轮出扫描池就**没有 Signal**，
@@ -285,30 +285,43 @@ def _merge_held_positions(
     风控优先于选股：**持仓意味着有钱在里面，必须每天被看一眼**，
     哪怕它已不再是一个值得新建仓的标的。
 
-    ⚠️ 副作用（有意为之，非疏漏）：入池后该票也会正常参与买入候选——
-    与 `_merge_watchlist` 同构，且 `_run_portfolio` 本就允许对已持仓票按新买点分批加仓
-    （`tranche_fraction<1.0` 的金字塔加码），故不额外设限，行为与池内其他票一致。
+    **只分析、不进买入候选**（2026-08-31 用户决定）：强制入池是**风控措施**，
+    不是"这只票值得买"的判断——恰恰相反，它是已被扫描池轮出的票。故入池后：
+      - ✅ 照常算 quant/chan/宏观 → 出评级 → **结构止损与卖点每日被评估**（入池的唯一目的）；
+      - ❌ 不进买入候选（`_run_portfolio(no_buy=...)`），评级即便是 Buy 也不加仓，
+           并打 `HELD_NO_ADD` 让报告与账本口径一致——**评级说买、账本不买而报告不说，
+           就是又一次"静默背离"**，正是本项目反复栽跟头的那类缺陷。
+    仍留在池内的持仓票不受影响，金字塔分批加仓（`tranche_fraction`）照旧：
+    区别在于"还够格留在池里"本身就是一次正面判断，被轮出则不是。
+
+    **并入 `core_pool` 而非 `dynamic_pool`**：dynamic_pool 会随 stock_pool.json 持久化，
+    次日 `load_dynamic_pool` 读回后此票即变成普通池成员——`held-position` 标记消失、
+    no_buy 名单第二天就失效（**只管一天的规则等于没有规则**）。core_pool 每轮从
+    STOCK_POOL 重建、不持久化、且"永不被自动移除"（`screen_for_removes` 只看
+    dynamic_pool），正是持仓票需要的两条性质；平仓后它自然不再被强制，无需 remove 流程。
     """
     changes: List[PoolChange] = []
+    forced:  List[str] = []
     try:
         state = load_portfolio(_PORTFOLIO_PATH, PORTFOLIO_INITIAL_CAPITAL)
         held = sorted(state.get("positions", {}).keys())
     except Exception as e:                    # 台账损坏不应阻断整轮扫描
         logger.warning(f"[Pool] 读取 paper 持仓失败，跳过持仓票强制入池: {e}")
-        return changes
+        return changes, forced
     for ticker in held:
         if ticker in core_pool or ticker in dynamic_pool:
-            continue
-        dynamic_pool.append(ticker)
+            continue                          # 仍在池内 → 正常成员，加仓规则不变
+        core_pool.append(ticker)
         buckets.setdefault("custom", []).append(ticker)
+        forced.append(ticker)
         changes.append(PoolChange(
             date=date_str, action="add", ticker=ticker,
-            reason="paper 持仓票强制入池（保证结构止损与卖点每日被评估）",
+            reason="paper 持仓票强制入池（只分析、不进买入候选；保证止损与卖点每日被评估）",
             source="held-position",
         ))
         logger.warning(f"  + {ticker} ← paper 持仓但已轮出扫描池 → 强制入池 "
-                       f"[custom]（否则其止损不会被评估）")
-    return changes
+                       f"[custom · 只分析不加仓]（否则其止损不会被评估）")
+    return changes, forced
 
 
 def _non_interactive_pool_update(
@@ -355,23 +368,32 @@ _PORTFOLIO_PATH = Path(settings.output_dir) / "us_portfolio.json"
 
 
 def _run_portfolio(decisions: Dict[str, StockDecision],
-                   prices: Dict, date_str: str) -> dict:
+                   prices: Dict, date_str: str,
+                   no_buy: Optional[List[str]] = None) -> dict:
     """按策略信号推进美股模拟组合一天（不改策略，仅记账）。
 
     买入：Buy/Overweight → 目标市值 = 建议仓位 × 初始资金，按买点确认**分批**建仓
     （每个新买点买 1/3 目标，累加至目标；同一买点滞留不重复加），总仓受 30% 上限约束
     （R9 双 sleeve：paper 组合=仅战术 sleeve；核心名 CORE_HOLDINGS 不进买入候选，
     分析照跑供核心择时复用，防同名双重敞口——卖出信号仍生效以清历史遗留仓）。
+    `no_buy`（R9.9）：已轮出扫描池、仅为风控被强制入池的持仓票——**只分析不加仓**，
+    卖出/止损一侧完全不受影响（那正是把它们拉回池里的理由）。
     卖出（全部卖出）：评级为 Sell/Underweight，或缠论卖点(s1/s2/s3)经迟滞层
     连续 CONFIRM_DAYS 天确认（chan_sell_confirmed，panic 直通），或跌破结构止损
     （止损不受迟滞约束，风控优先）。成交价 = 信号当日收盘价。
     """
     _BUY  = {"Buy", "Overweight"}
     _SELL = {"Sell", "Underweight"}
+    _no_buy = set(no_buy or ())
+
+    def _buyable(d: StockDecision) -> bool:
+        """买入候选资格：核心名（双 sleeve 隔离）与强制入池持仓票（风控入池）均排除。"""
+        return (d.rating in _BUY
+                and d.ticker not in CORE_HOLDINGS
+                and d.ticker not in _no_buy)
 
     # 当日买入排名（final_score 降序）→ 现金不足时优先靠前的票
-    buys_sorted = sorted([d for d in decisions.values()
-                          if d.rating in _BUY and d.ticker not in CORE_HOLDINGS],
+    buys_sorted = sorted([d for d in decisions.values() if _buyable(d)],
                          key=lambda d: d.final_score, reverse=True)
     rank_of = {d.ticker: i + 1 for i, d in enumerate(buys_sorted)}
 
@@ -382,7 +404,7 @@ def _run_portfolio(decisions: Dict[str, StockDecision],
         signals.append(Signal(
             code=ticker,
             price=price,
-            is_buy=(d.rating in _BUY and ticker not in CORE_HOLDINGS),
+            is_buy=_buyable(d),
             is_sell=(d.rating in _SELL or d.chan_sell_confirmed),
             position_frac=d.suggested_position,
             stop_loss=d.stop_loss or 0.0,
@@ -484,7 +506,9 @@ def run(non_interactive: bool = False,
     buckets      = copy.deepcopy(BUCKETS)
     wl_changes   = _merge_watchlist(core_pool, dynamic_pool, buckets, date_str)
     # 持仓票强制入池须在 watchlist 之后、扫描之前——它是风控前提，不是选股偏好
-    wl_changes  += _merge_held_positions(core_pool, dynamic_pool, buckets, date_str)
+    held_changes, forced_held = _merge_held_positions(
+        core_pool, dynamic_pool, buckets, date_str)
+    wl_changes  += held_changes
     current_pool = sorted(set(core_pool) | set(dynamic_pool))
     logger.info(f"启动池: core={len(core_pool)} dynamic={len(dynamic_pool)} 合并={len(current_pool)}")
 
@@ -651,8 +675,16 @@ def run(non_interactive: bool = False,
     # ── B 迟滞：抑制"昨多→今出"隔夜翻转（需连续确认才清仓）──
     apply_hysteresis(decisions, date_str)
 
+    # ── 强制入池的持仓票：只分析不加仓，评级仍是 Buy 时须明示（防静默背离）──
+    for _t in forced_held:
+        _d = decisions.get(_t)
+        if _d is not None and _d.rating in ("Buy", "Overweight"):
+            _d.risk_flags.append(
+                "HELD_NO_ADD: 已轮出扫描池、仅为风控强制入池 → 只分析不加仓（卖点/止损照常生效）")
+            logger.warning(f"  ! {_t} 评级 {_d.rating} 但属强制入池持仓票 → 不加仓（HELD_NO_ADD）")
+
     # ── 模拟组合：按策略信号自动买卖、跨日追踪（不改策略，仅记账）──
-    portfolio = _run_portfolio(decisions, prices, date_str)
+    portfolio = _run_portfolio(decisions, prices, date_str, no_buy=forced_held)
     pf_cur = portfolio["history"][-1]
     logger.info(
         f"── 模拟组合 ── 权益 ${pf_cur['equity']:,.0f} "
@@ -709,7 +741,7 @@ def run(non_interactive: bool = False,
     # 结构化快照：同一次运行的裁决存成 json，供核心 sleeve（core_research.py）
     # 交叉引用——`今日操作.md` 是散文，字段被排版吃掉，程序读不出来。
     snap_path = write_tactical_snapshot(decisions, macro, portfolio, prices,
-                                        date_str, output_dir)
+                                        date_str, output_dir, no_buy=forced_held)
     logger.info(f"  已写入: {snap_path}")
 
     logger.info("── 量化评分排行（按 score 降序）──")

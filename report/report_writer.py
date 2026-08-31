@@ -596,6 +596,7 @@ def write_tactical_snapshot(
     prices:     Dict,
     date_str:   str,
     output_dir: Path,
+    no_buy:     Optional[List[str]] = None,
 ) -> Path:
     """写战术 sleeve 结构化快照 output/{date}/tactical_snapshot.json。
 
@@ -606,8 +607,14 @@ def write_tactical_snapshot(
 
     ⚠️ 两本账彼此独立：paper `initial_capital` 与真金 `core_ledger.total_capital`
     各自 $100k、互不相干，合起来不等于一本 70/30。`book` 字段写死这一点。
+
+    `no_buy`：仅为风控被强制入池的持仓票（已轮出扫描池）——它们**只分析不加仓**，
+    故 `tactical_tradable=false` 且 `no_buy_reason` 写明原因。评级照出，但那是
+    「这只票现在什么状态」，不是「可以买」——两者在报告里必须能分开读。
     """
     import json
+
+    _no_buy = set(no_buy or ())
 
     output_dir.mkdir(parents=True, exist_ok=True)
     hist = state.get("history", [])
@@ -655,7 +662,11 @@ def write_tactical_snapshot(
             "is_core": t in CORE_HOLDINGS,
             # 核心名在 main.py 里被排除出买入候选（防同名双重敞口），
             # 分析照跑——所以它们的评级是**分析结论、不是战术下单指令**。
-            "tactical_tradable": t not in CORE_HOLDINGS,
+            # 强制入池的持仓票同理（只分析不加仓），但卖点/止损照常生效。
+            "tactical_tradable": t not in CORE_HOLDINGS and t not in _no_buy,
+            "no_buy_reason": ("core-holding" if t in CORE_HOLDINGS
+                              else "held-forced-into-pool" if t in _no_buy
+                              else None),
         }
 
     bar_asof, lagging, ahead = _bar_asof(prices)
