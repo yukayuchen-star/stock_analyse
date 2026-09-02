@@ -307,23 +307,52 @@ def _gate_view(gate: dict | None, next_earnings: str | None) -> tuple[dict, list
                      f"相差 {abs((pd.Timestamp(nxt) - pd.Timestamp(ed)).days)} 天 → "
                      f"财报日估计值漂移，属正常；**表照旧有效，不得重写**)")
 
-    # ── 指引采集（2026-08-28 制度化）──────────────────────
-    # 公司自己给的下季指引是财报前**信息量最高**的一个数，而且写表时它就已经可得
-    # （上一季新闻稿里）。审计发现 6 只里只有 NVDA 录了 —— 这是**流程缺口不是数据缺口**：
-    # 另五只 7 月底就报过，指引躺在它们的新闻稿里，只是没人去取。
-    # 故此处显式点名，逼报告每次面对它；不计入 integrity（缺指引不影响表的事前性）。
-    b = gate.get("basis") or {}
-    has_g = any(k.startswith("guidance") for k in b)
-    view_guidance = has_g
-    if not has_g:
+    # ── 指引采集（2026-08-28 制度化 / 2026-09-02 修误报）──────────
+    # 公司自己给的下季指引是财报前**信息量最高**的一个数，写表时它就已经可得（上一季新闻稿里）。
+    #
+    # ⚠️ 2026-09-02 修两处误报——原实现只扫 `basis`、且把「没有」一律读成「流程缺口」：
+    #   ① **指引可能录在 `basis_appended` 里**。补录规则明写「只补 basis，不动
+    #      red/green/written_at」，故财报后采集的指引落在 `basis_appended`；只扫 `basis`
+    #      就看不见它。实测 AMZN($197–202B)/META($61–64B) 2026-08-29 已录，却仍被报缺。
+    #   ② **「拿不到」与「没去拿」是两回事**。AAPL/MSFT 新闻稿结构性不含 outlook、
+    #      GOOGL 结构性不给营收指引（均已读原文确认，记在 `guidance_available=false`）
+    #      —— 这是**永久数据约束**，报成「下次财报后须补录」等于每季派一个永远做不完的动作，
+    #      而真正的缺口反而淹没在里面。**一个永远亮着的告警等于没有告警。**
+    # 故改判三态：captured / unavailable(永久约束) / missing(真流程缺口)。
+    # 三态都不计入 integrity（有无指引不影响表的事前性）。
+    b   = gate.get("basis") or {}
+    ba  = gate.get("basis_appended") or {}
+    # `guidance_available` / `_note` / `_source` 是元数据不是指引本身；
+    # 且 bool 在 Python 里是 int 的子类，必须显式排除，否则 available=False 会被当成数字。
+    _META_G = ("guidance_available", "guidance_note", "guidance_source")
+    def _has_guidance_number(d: dict) -> bool:
+        return any(k.startswith("guidance") and k not in _META_G
+                   and isinstance(v, (int, float)) and not isinstance(v, bool)
+                   for k, v in d.items())
+
+    if ba.get("guidance_available") is False:
+        # 采集时已读原文确认公司不给 —— 这条判断由人写下，优先于「有没有数字」
+        # （GOOGL 给 capex 不给营收，仍属不可得）。
+        g_status = "unavailable"
+    elif _has_guidance_number(b) or _has_guidance_number(ba):
+        g_status = "captured"
+    else:
+        g_status = "missing"
+
+    if g_status == "unavailable":
+        _why = str(ba.get("guidance_note") or "公司披露惯例不含前瞻指引（采集时已读原文确认）")
+        flags.append(f"GATES_GUIDANCE_UNAVAILABLE(指引**永久不可得**，非流程缺口，"
+                     f"无需也无法补录：{_why[:120]})")
+    elif g_status == "missing":
         flags.append("GATES_NO_GUIDANCE(表里没有公司自己的下季指引 → 判据只能挂在"
                      "一致预期上，少了最有信息量的那一条；下次财报后须读官方新闻稿补录)")
 
     view = dict(gate)
-    view["guidance_captured"] = view_guidance
+    view["guidance_captured"] = (g_status == "captured")
+    view["guidance_status"]   = g_status
     view["days_to_earnings"] = d2e
     # 日期漂移不是完整性问题：它不影响 written_at 早于 earnings_date 这一唯一价值来源。
-    _SOFT = ("GATES_DATE_DRIFT", "GATES_NO_GUIDANCE")
+    _SOFT = ("GATES_DATE_DRIFT", "GATES_NO_GUIDANCE", "GATES_GUIDANCE_UNAVAILABLE")
     hard = [f for f in flags if not f.startswith(_SOFT)]
     view["integrity"] = "ok" if not hard else "degraded"
     return view, flags
