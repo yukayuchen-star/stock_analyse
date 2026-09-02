@@ -17,7 +17,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -197,14 +197,23 @@ def screen_for_removes(
     chan_results:  Dict[str, ChanSignalResult],
     dynamic_pool:  List[str],
     remove_threshold: float = REMOVE_THRESHOLD,
+    protect:       Optional[Iterable[str]] = None,
 ) -> List[ScreeningCandidate]:
     """
     从 dynamic_pool 中找 quant 分数 ≤ remove_threshold 或 chan 出现卖点的减仓候选。
 
     core_pool 不参与（永不被自动移除）。
+
+    `protect`：**有真实持仓的票**，一律不列为移除候选。移出扫描池并不会卖掉它，
+    只会让它当日没有 `Signal`——结构止损不被检验、仓位按成本计价（R9.8 盲区）。
+    「该不该继续持有」由 `update_portfolio` 的卖点/结构止损裁决，不由池成员资格裁决；
+    弱势本身恰恰是要每天盯着它的理由，不是把它从视野里删掉的理由。
     """
+    _protect = set(protect or ())
     cands: List[ScreeningCandidate] = []
     for t in dynamic_pool:
+        if t in _protect:
+            continue
         q = quant_results.get(t)
         c = chan_results.get(t)
         if q is None:

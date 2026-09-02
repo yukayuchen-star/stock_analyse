@@ -283,6 +283,10 @@ def _daily_summary(
     lines.append("")
 
     # 可操作信号
+    # ⚠️「买入 / 增持」是**指令式**标题，而 ranked 覆盖全池：核心名（归 Core sleeve
+    # 手动执行）与 HELD_NO_ADD（强制留池的持仓票，只分析不加仓）评级也可能是 Buy，
+    # 但战术账本一律不会买。把原因写在**行内**——只把标记留在下方风险提示里，
+    # 等于让读者照着一条账本永远不会执行的建议下单（"评级说买、账本不买、报告不提"）。
     actionable_buy  = [d for d in ranked if d.rating in ("Buy", "Overweight") and d.suggested_position > 0]
     actionable_sell = [d for d in ranked if d.rating in ("Sell", "Underweight")]
 
@@ -296,9 +300,14 @@ def _daily_summary(
             if d.chan_signal and (d.chan_signal.buy_point_type or d.chan_signal.sell_point_type):
                 pt = d.chan_signal.buy_point_type or d.chan_signal.sell_point_type
                 chan_pt = f" [{pt.upper()}]"
+            note = ""
+            if d.ticker in CORE_HOLDINGS:
+                note = "　⛔ 核心持仓，归 Core sleeve 手动执行，战术账本不下单"
+            elif any(str(f).startswith("HELD_NO_ADD") for f in (d.risk_flags or [])):
+                note = "　⛔ 已轮出扫描池、仅为风控强制留池 → **只分析不加仓**（卖点/止损照常）"
             lines.append(
                 f"- **{d.ticker}**{chan_pt} [{d.rating} {d.final_score:+.3f}]  "
-                f"入场 {entry}  止损 {d.stop_loss:.2f}  止盈 {d.take_profit:.2f}"
+                f"入场 {entry}  止损 {d.stop_loss:.2f}  止盈 {d.take_profit:.2f}{note}"
             )
         lines.append("")
     else:
@@ -374,6 +383,7 @@ def _daily_action_sheet(
     macro:     MacroSignalResult,
     state:     dict,
     date_str:  str,
+    no_buy:    Optional[List[str]] = None,
 ) -> str:
     """精简执行单：①今日判断 ②今日买卖点 ③当前仓位。数据取自组合 state（已按 MAX_PORTFOLIO_EXPOSURE 上限成交的**真实**结果）。"""
     hist = state.get("history", [])
@@ -475,13 +485,19 @@ def _daily_action_sheet(
         L += ["> 当前空仓。", ""]
 
     # ── 候补：想买但被上限/现金挡下 ──
+    # ⚠️ `no_buy`（强制留池的持仓票）**必须排除**：候补区那句"腾出额度/现金后优先补入"
+    # 是个承诺，而账本对它永远不会执行。平时它在 `held` 里被过滤掉，但**它当日被止损
+    # 卖出后就不在 `held` 里了**——而那恰恰是强制留池要促成的事，于是刚砍掉的票立刻
+    # 出现在候补里劝你补回去。评级说买、账本不买、报告不说 = 又一次静默背离。
+    _no_buy = set(no_buy or ())
     held = set(positions.keys())
     bought_today = {t["code"] for t in buys}
     queued = [d for d in sorted(decisions.values(), key=lambda x: x.final_score, reverse=True)
               if d.rating in ("Buy", "Overweight") and d.suggested_position > 0
               and d.ticker not in held and d.ticker not in bought_today
               # 核心名归 Core sleeve（手动执行），不得出现在战术候补里诱导重复建仓
-              and d.ticker not in CORE_HOLDINGS]
+              and d.ticker not in CORE_HOLDINGS
+              and d.ticker not in _no_buy]
     if queued:
         L += ["## 候补（评级达标，暂被仓位上限/现金挡下）", ""]
         for d in queued:
@@ -489,6 +505,16 @@ def _daily_action_sheet(
                   if d.chan_signal and d.chan_signal.buy_point_type else "—")
             L.append(f"- {d.ticker} [{bp} {d.final_score:+.2f}] 建议仓位 {d.suggested_position:.0%}"
                      f"（腾出额度/现金后优先补入）")
+        L.append("")
+
+    # 排除掉的那些单独说明：不写等于把"今天不买"伪装成"今天没信号"
+    _blocked = [d for d in sorted(decisions.values(), key=lambda x: x.final_score, reverse=True)
+                if d.ticker in _no_buy and d.rating in ("Buy", "Overweight")]
+    if _blocked:
+        L += ["## 评级达标但不加仓（风控强制留池）", ""]
+        for d in _blocked:
+            L.append(f"- {d.ticker} [{d.rating} {d.final_score:+.2f}] "
+                     f"已轮出扫描池，仅为让止损/卖点每日被检验而留池 → **不加仓、不补回**")
         L.append("")
 
     L += ["---", "> 执行提示：成交价=信号日收盘；实盘次日开盘下单会有滑点。止损为**结构位**，跌破即离场。"]
@@ -503,11 +529,17 @@ def write_daily_action_sheet(
     state:      dict,
     date_str:   str,
     output_dir: Path,
+    no_buy:     Optional[List[str]] = None,
 ) -> Path:
-    """写精简每日执行单 output/{date}/今日操作.md（live 每日照此下单）。"""
+    """写精简每日执行单 output/{date}/今日操作.md（live 每日照此下单）。
+
+    `no_buy`：强制留池的持仓票（只分析不加仓）——与 `write_tactical_snapshot` 同一份
+    名单。**这份文件是照着下单的**，所以它比任何报告都更不能出现账本不会执行的建议。
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "今日操作.md"
-    path.write_text(_daily_action_sheet(decisions, macro, state, date_str), encoding="utf-8")
+    path.write_text(_daily_action_sheet(decisions, macro, state, date_str, no_buy=no_buy),
+                    encoding="utf-8")
     return path
 
 
@@ -609,8 +641,13 @@ def write_tactical_snapshot(
     各自 $100k、互不相干，合起来不等于一本 70/30。`book` 字段写死这一点。
 
     `no_buy`：仅为风控被强制入池的持仓票（已轮出扫描池）——它们**只分析不加仓**，
-    故 `tactical_tradable=false` 且 `no_buy_reason` 写明原因。评级照出，但那是
+    故 `tactical_buyable=false` 且 `no_buy_reason` 写明原因。评级照出，但那是
     「这只票现在什么状态」，不是「可以买」——两者在报告里必须能分开读。
+
+    ⚠️ `tactical_tradable`（在不在战术账本里）与 `tactical_buyable`（能不能买）
+    **是两个标，不可合并**。合并过一次：持仓票转 Sell 时整行被 `core_research`
+    的 `actionable` 过滤器丢弃，统一操作指引里那条离场根本不出现——
+    风控修复漏在呈现层，与它本要修的决策层盲区同构。
     """
     import json
 
@@ -660,10 +697,12 @@ def write_tactical_snapshot(
             } if c is not None else None),
             "quant_score": round(float(q.score), 4) if q is not None else None,
             "is_core": t in CORE_HOLDINGS,
-            # 核心名在 main.py 里被排除出买入候选（防同名双重敞口），
-            # 分析照跑——所以它们的评级是**分析结论、不是战术下单指令**。
-            # 强制入池的持仓票同理（只分析不加仓），但卖点/止损照常生效。
-            "tactical_tradable": t not in CORE_HOLDINGS and t not in _no_buy,
+            # 核心名：paper 账本里压根没有它（main.py 排除，防同名双重敞口），
+            # 买卖两侧都不是战术指令，评级只是**分析结论** → 两标皆 false。
+            "tactical_tradable": t not in CORE_HOLDINGS,
+            # 强制入池的持仓票：账本里**有真仓位** → tradable=true（卖点/结构止损
+            # 照常执行，这正是它入池的唯一目的），buyable=false（不加仓）。
+            "tactical_buyable": t not in CORE_HOLDINGS and t not in _no_buy,
             "no_buy_reason": ("core-holding" if t in CORE_HOLDINGS
                               else "held-forced-into-pool" if t in _no_buy
                               else None),

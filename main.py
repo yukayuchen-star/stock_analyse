@@ -3,7 +3,7 @@ import copy
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 from loguru import logger
 
 import utils.logger  # 触发 setup_logger()
@@ -14,8 +14,8 @@ from config.stocks     import (
     PORTFOLIO_TRANCHE_FRACTION, CORE_HOLDINGS,
 )
 from config.pool_manager import (
-    PoolChange, append_pool_changes, load_dynamic_pool, load_us_watchlist,
-    save_pool_snapshot,
+    PoolChange, append_pool_changes, load_dynamic_pool, load_forced_held,
+    load_us_watchlist, save_pool_snapshot,
 )
 from data.pipeline import DataPipeline
 from data.universe import get_universe
@@ -92,9 +92,16 @@ def _print_pool_state(
     core_pool: List[str],
     dynamic_pool: List[str],
     buckets: Dict[str, List[str]],
+    forced_held: Optional[Iterable[str]] = None,
 ) -> None:
-    print(f"\nCore  ({len(core_pool):2d}): {', '.join(core_pool)}")
+    # 强制留池的持仓票挂在 core_pool 上（借它"永不自动移除"的性质），但它们
+    # 不是战略核心池成员——分行显示，免得看起来像 STOCK_POOL 又扩了几只。
+    _forced = sorted(set(forced_held or ()) & set(core_pool))
+    _core   = [t for t in core_pool if t not in set(_forced)]
+    print(f"\nCore  ({len(_core):2d}): {', '.join(_core)}")
     print(f"Dynam ({len(dynamic_pool):2d}): {', '.join(dynamic_pool) or '(空)'}")
+    if _forced:
+        print(f"Held! ({len(_forced):2d}): {', '.join(_forced)}  ← paper 持仓强制留池（只分析不加仓）")
     for bname, btickers in buckets.items():
         print(f"  [{bname}]: {', '.join(btickers)}")
 
@@ -124,6 +131,7 @@ def _interactive_pool_editor(
     add_candidates: List[ScreeningCandidate],
     remove_candidates: List[ScreeningCandidate],
     date_str: Optional[str] = None,
+    forced_held: Optional[Iterable[str]] = None,
 ) -> Tuple[List[str], List[str], Dict[str, List[str]], List[PoolChange]]:
     """
     展示候选 + 当前池，让用户决定 add/remove。
@@ -144,7 +152,7 @@ def _interactive_pool_editor(
     print(f"\n{sep}")
     print(f"  股票池编辑器 — {date_str}")
     print(sep)
-    _print_pool_state(core_pool, dynamic_pool, buckets)
+    _print_pool_state(core_pool, dynamic_pool, buckets, forced_held)
 
     # ── 加仓候选 ───────────────────────────────────────────
     print(f"\n── 加仓候选 ({len(add_candidates)} 只，已通过预过滤+量化筛选) ──")
@@ -212,6 +220,12 @@ def _interactive_pool_editor(
     raw = input("手动移除股票（不含 core，逗号分隔 / 空跳过）: ").strip()
     if raw:
         for ticker in [t.strip().upper() for t in raw.split(",") if t.strip()]:
+            if ticker in set(forced_held or ()):
+                # 说清真实理由：它不是核心池成员，而是有真仓位的票。移出池不会卖掉它，
+                # 只会让它当日没有 Signal → 结构止损不被检验（R9.8 盲区）。
+                print(f"  ✗ {ticker} 有 paper 持仓，强制留池不可移除"
+                      f"（移出只会让它的止损当日不被检验；要离场请走卖点/止损）")
+                continue
             if ticker in core_pool:
                 print(f"  ✗ {ticker} 是 core_pool 不可移除")
                 continue
@@ -267,11 +281,26 @@ def _merge_watchlist(
     return changes
 
 
+def _paper_held() -> List[str]:
+    """paper 台账当前持仓票（排序）。台账损坏返回空表——不应阻断整轮扫描。
+
+    单独抽出来是因为有**两处**需要它：入池前的强制并入，以及池编辑之后的
+    「持仓票必须在 final_pool 里」不变量断言。两处必须看同一份名单。
+    """
+    try:
+        state = load_portfolio(_PORTFOLIO_PATH, PORTFOLIO_INITIAL_CAPITAL)
+        return sorted(state.get("positions", {}).keys())
+    except Exception as e:                    # 台账损坏不应阻断整轮扫描
+        logger.warning(f"[Pool] 读取 paper 持仓失败，跳过持仓票强制入池: {e}")
+        return []
+
+
 def _merge_held_positions(
     core_pool: List[str],
     dynamic_pool: List[str],
     buckets: Dict[str, List[str]],
     date_str: str,
+    prev_forced: Optional[Iterable[str]] = None,
 ) -> Tuple[List[PoolChange], List[str]]:
     """paper 持仓票强制并入 core_pool（就地修改），返回 (变更记录, 强制入池名单)。
 
@@ -299,26 +328,32 @@ def _merge_held_positions(
     no_buy 名单第二天就失效（**只管一天的规则等于没有规则**）。core_pool 每轮从
     STOCK_POOL 重建、不持久化、且"永不被自动移除"（`screen_for_removes` 只看
     dynamic_pool），正是持仓票需要的两条性质；平仓后它自然不再被强制，无需 remove 流程。
+
+    ⚠️ **本函数只堵得住"已经掉出池"的票**：它跑在 `screen_for_removes` / 池编辑器之前，
+    对仍在 dynamic_pool 里的持仓票直接 `continue`，而那些票**当轮仍可能被移除**
+    （TKO 2026-08-31 即以 `quant=-0.33` 被自动移除）。另一半由两处补齐：
+    `screen_for_removes(protect=...)` 不再把持仓票列为移除候选，以及池编辑之后
+    「持仓票必须在 final_pool 里」的不变量断言（覆盖手动移除等所有路径）。
+
+    `prev_forced`：上一份快照里的强制留池名单。强制入池每轮重新推导（core_pool 不
+    持久化），**变更日志只在状态翻转时写**——否则同一只票天天写一条 add、永远没有
+    配对的 remove，`pool_history.jsonl` 就再也回放不出池状态（实测 TKO 已重复 5 条）。
     """
     changes: List[PoolChange] = []
     forced:  List[str] = []
-    try:
-        state = load_portfolio(_PORTFOLIO_PATH, PORTFOLIO_INITIAL_CAPITAL)
-        held = sorted(state.get("positions", {}).keys())
-    except Exception as e:                    # 台账损坏不应阻断整轮扫描
-        logger.warning(f"[Pool] 读取 paper 持仓失败，跳过持仓票强制入池: {e}")
-        return changes, forced
-    for ticker in held:
+    _prev = set(prev_forced or ())
+    for ticker in _paper_held():
         if ticker in core_pool or ticker in dynamic_pool:
             continue                          # 仍在池内 → 正常成员，加仓规则不变
         core_pool.append(ticker)
         buckets.setdefault("custom", []).append(ticker)
         forced.append(ticker)
-        changes.append(PoolChange(
-            date=date_str, action="add", ticker=ticker,
-            reason="paper 持仓票强制入池（只分析、不进买入候选；保证止损与卖点每日被评估）",
-            source="held-position",
-        ))
+        if ticker not in _prev:               # 仅状态翻转才记一条，见 docstring
+            changes.append(PoolChange(
+                date=date_str, action="add", ticker=ticker,
+                reason="paper 持仓票强制入池（只分析、不进买入候选；保证止损与卖点每日被评估）",
+                source="held-position",
+            ))
         logger.warning(f"  + {ticker} ← paper 持仓但已轮出扫描池 → 强制入池 "
                        f"[custom · 只分析不加仓]（否则其止损不会被评估）")
     return changes, forced
@@ -503,11 +538,12 @@ def run(non_interactive: bool = False,
     # ── 加载 core + dynamic + watchlist_us（R2.1 人工强制关注）──
     core_pool    = list(STOCK_POOL)
     dynamic_pool = load_dynamic_pool()
+    prev_forced  = load_forced_held()          # 上一轮强制留池名单：判断状态翻转用
     buckets      = copy.deepcopy(BUCKETS)
     wl_changes   = _merge_watchlist(core_pool, dynamic_pool, buckets, date_str)
     # 持仓票强制入池须在 watchlist 之后、扫描之前——它是风控前提，不是选股偏好
     held_changes, forced_held = _merge_held_positions(
-        core_pool, dynamic_pool, buckets, date_str)
+        core_pool, dynamic_pool, buckets, date_str, prev_forced=prev_forced)
     wl_changes  += held_changes
     current_pool = sorted(set(core_pool) | set(dynamic_pool))
     logger.info(f"启动池: core={len(core_pool)} dynamic={len(dynamic_pool)} 合并={len(current_pool)}")
@@ -564,10 +600,13 @@ def run(non_interactive: bool = False,
     chan_init  = _run_chan_for_pool(current_pool, prices)
 
     # ── remove 候选（基于 current 的 quant + chan）────────
+    # 有 paper 持仓的票不列为移除候选：移出池不会卖掉它，只会让它当日没有 Signal
+    # → 止损不被检验、按成本计价。弱势是每天盯着它的理由，不是删掉它的理由。
     remove_cands = screen_for_removes(
         quant_results=quant_init,
         chan_results=chan_init,
         dynamic_pool=dynamic_pool,
+        protect=_paper_held(),
     )
 
     # ── 池变更落地：TTY 交互编辑器 / cron 非交互更新（R2.1）──────
@@ -589,8 +628,42 @@ def run(non_interactive: bool = False,
             add_candidates=add_cands,
             remove_candidates=remove_cands,
             date_str=date_str,
+            forced_held=forced_held,
         )
     changes = wl_changes + changes
+
+    # ── 不变量：有 paper 持仓的票必须在 final_pool 里 ──────────
+    # `_merge_held_positions` 跑在移除之前，只堵得住"已经掉出池"的票；上面的
+    # `screen_for_removes` / 编辑器（自动候选、手动移除、非交互三条路径）仍能把一只
+    # **仍在池内**的持仓票移出去，那就重演 R9.8 盲区：无 Signal → `update_portfolio`
+    # 的卖出循环 `if sig is None ... continue` 跳过它 → 结构止损当日不被检验、
+    # 仓位按成本计价。逐条堵路径堵不干净，故在所有移除路径**之后**统一断言一次。
+    for _t in _paper_held():
+        if _t in final_pool:
+            continue
+        core_pool.append(_t)                  # 入 core 而非 dynamic：不持久化、不被自动移除
+        final_pool = sorted(set(final_pool) | {_t})
+        buckets.setdefault("custom", []).append(_t)
+        forced_held.append(_t)
+        if _t not in set(prev_forced):        # 仅状态翻转才记一条（同 _merge_held_positions）
+            changes.append(PoolChange(
+                date=date_str, action="add", ticker=_t,
+                reason="paper 持仓票本轮被移出扫描池 → 按不变量强制留池（只分析、不进买入候选）",
+                source="held-position",
+            ))
+        logger.warning(f"  ! {_t} 本轮被移出扫描池但仍有 paper 持仓 → 强制留池"
+                       f"（否则其结构止损当日不会被检验）")
+
+    # 强制留池状态结束（多半是平仓）且确实已不在池内 → 补一条 remove，
+    # 让 pool_history.jsonl 的 add/remove 配平、仍可回放出池状态。
+    # 若它已被正常筛选加回 dynamic_pool，则仍在 final_pool 里，不记 remove。
+    for _t in prev_forced:
+        if _t not in final_pool:
+            changes.append(PoolChange(
+                date=date_str, action="remove", ticker=_t,
+                reason="paper 已无持仓 → 解除强制留池",
+                source="held-position",
+            ))
 
     # ── 池如有变化：补抓 delta + 复跑 quant/chan ──────────
     if set(final_pool) != set(current_pool):
@@ -735,7 +808,8 @@ def run(non_interactive: bool = False,
     logger.info(f"  已写入: {pf_path}")
 
     # 精简每日执行单（live 每日照此下单）：判断 + 今日买卖点 + 仓位
-    action_path = write_daily_action_sheet(decisions, macro, portfolio, date_str, output_dir)
+    action_path = write_daily_action_sheet(decisions, macro, portfolio, date_str, output_dir,
+                                           no_buy=forced_held)
     logger.info(f"  已写入: {action_path}")
 
     # 结构化快照：同一次运行的裁决存成 json，供核心 sleeve（core_research.py）
@@ -775,8 +849,9 @@ def run(non_interactive: bool = False,
     # ── 落盘：池快照 + 变更日志 ──────────────────────────
     save_pool_snapshot(
         date_str=date_str,
-        core_pool=core_pool,
+        core_pool=core_pool,          # 内含 forced_held，由 save_pool_snapshot 扣除分栏
         dynamic_pool=new_dynamic,
+        forced_held=forced_held,
         buckets=buckets,
         decisions={
             t: {"rating": d.rating, "score": d.final_score}

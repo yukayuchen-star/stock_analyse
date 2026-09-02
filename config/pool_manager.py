@@ -9,6 +9,8 @@
   - core_pool（=config.stocks.STOCK_POOL）永不被自动移除，仅在快照中标注
   - dynamic_pool 由筛选 + 用户确认逐日演化
   - 加载 dynamic_pool：从最近一份 stock_pool.json 读取，不存在则返回空
+  - forced_held（R9.10）：仅为风控被强制留池的 paper 持仓票，快照中**单列一栏**，
+    不混进 core_pool——它们是被扫描池刷下来的票，不是战略核心池成员
 """
 from __future__ import annotations
 
@@ -62,6 +64,23 @@ def _latest_snapshot_file() -> Optional[Path]:
     return snapshots[-1] if snapshots else None
 
 
+def load_forced_held() -> List[str]:
+    """从最近一份 stock_pool.json 读取上一轮的 forced_held；无快照/旧格式返回空。
+
+    用途只有一个：判断「持仓票强制留池」是不是**状态翻转**。强制入池每轮重新推导
+    （core_pool 不持久化），若无条件写变更日志，同一只票会天天写一条 add 且永远
+    没有配对的 remove，`pool_history.jsonl` 就再也回放不出池状态。
+    """
+    f = _latest_snapshot_file()
+    if f is None:
+        return []
+    try:
+        return json.loads(f.read_text()).get("forced_held", [])
+    except Exception as e:
+        logger.warning(f"[Pool] 读取 forced_held 失败 {f}: {e}")
+        return []
+
+
 def load_dynamic_pool() -> List[str]:
     """从最近一份 stock_pool.json 读取 dynamic_pool；无快照时返回空列表。"""
     f = _latest_snapshot_file()
@@ -86,16 +105,28 @@ def save_pool_snapshot(
     dynamic_pool: List[str],
     buckets:      Dict[str, List[str]],
     decisions:    Optional[Dict[str, dict]] = None,
+    forced_held:  Optional[List[str]] = None,
 ) -> Path:
-    """写入 output/<date>/stock_pool.json。"""
+    """写入 output/<date>/stock_pool.json。
+
+    `forced_held`：仅为风控被强制留池的 paper 持仓票（R9.9/R9.10）。运行期它们被塞进
+    `core_pool` 列表以借用「永不被自动移除」这条性质，但**它们不是战略核心池成员**
+    ——恰恰相反，它们是被扫描池刷下来的票。故落盘时从 core_pool 中扣掉、单列一栏，
+    否则读这份快照的人（或程序）会把一只弱势持仓票当成 STOCK_POOL 成员。
+    `final_pool` 仍然包含它们（它们确实在池里，当日确实出了信号）。
+    """
     out_dir = _OUTPUT_ROOT / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    forced = sorted(set(forced_held or ()))
+    core   = [t for t in core_pool if t not in set(forced)]
+
     snapshot = {
         "date":          date_str,
-        "core_pool":     core_pool,
+        "core_pool":     core,
         "dynamic_pool":  dynamic_pool,
-        "final_pool":    sorted(set(core_pool) | set(dynamic_pool)),
+        "forced_held":   forced,
+        "final_pool":    sorted(set(core) | set(dynamic_pool) | set(forced)),
         "buckets":       buckets,
         "decisions":     decisions or {},
         "saved_at":      datetime.now().isoformat(timespec="seconds"),

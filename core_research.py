@@ -642,15 +642,37 @@ def _tactical_link(asof: str, records: dict) -> tuple[dict, list[str]]:
                          "须先查清再引用任一侧结构位)")
 
     # ── 战术侧今日可执行行（非核心名）：短线动作原样透传，不作任何改写 ──
-    _ACT = {"Buy", "Overweight", "Sell", "Underweight"}
+    _BUY_ACT  = {"Buy", "Overweight"}
+    _SELL_ACT = {"Sell", "Underweight"}
+
+    def _actionable(r: dict) -> bool:
+        """买卖两侧分开判：**卖出侧对所有在战术账本里的票都生效**。
+
+        强制入池的持仓票 `tactical_buyable=false` 但 `tactical_tradable=true`——
+        它账本里有真仓位，离场指令必须出现在 §C，那正是它被强制入池的唯一目的。
+        早先只判一个合并标，导致这类票转 Sell 时整行在此处被丢弃、指引里看不到离场。
+        旧快照无 `tactical_buyable` → 回退到 `tactical_tradable`（旧口径），不炸。
+        """
+        rt = r.get("rating")
+        if not r.get("tactical_tradable"):
+            return False
+        if rt in _SELL_ACT:
+            return True
+        if rt in _BUY_ACT:
+            return bool(r.get("tactical_buyable", r.get("tactical_tradable")))
+        return False
+
     actionable = [
         {"ticker": t, "rating": r.get("rating"), "final_score": r.get("final_score"),
          "price": r.get("price"), "suggested_position": r.get("suggested_position"),
          "entry_price_range": r.get("entry_price_range"), "stop_loss": r.get("stop_loss"),
          "take_profit": r.get("take_profit"), "risk_flags": r.get("risk_flags"),
-         "chan_sell_confirmed": r.get("chan_sell_confirmed")}
+         "chan_sell_confirmed": r.get("chan_sell_confirmed"),
+         # 只分析不加仓的持仓票也会出现在这里（仅卖出侧）——写明原因，
+         # 免得读者把一条离场行误读成"这票可交易、也可以买"。
+         "no_buy_reason": r.get("no_buy_reason")}
         for t, r in sorted(dec.items(), key=lambda kv: -(kv[1].get("final_score") or 0))
-        if r.get("rating") in _ACT and r.get("tactical_tradable")
+        if _actionable(r)
     ]
 
     book = snap.get("book", {}) or {}
