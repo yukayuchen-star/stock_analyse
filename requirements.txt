@@ -19,7 +19,8 @@ pandas-ta>=0.3.14b
 # P5/P6 — 决策与报告
 bt>=0.2
 jinja2>=3.1
-mplfinance>=0.12
+mplfinance>=0.12              # ⚠️ 声明已久但无任何代码 import，实为死依赖
+plotly>=6.0                   # 七巨头缠论 K 线图（report/chan_chart.py）
 
 # P8 ML 回测
 lightgbm>=4.0

@@ -36,6 +36,7 @@ from decision.portfolio_core     import (
 )
 from report.report_writer        import (write_all_reports, write_daily_action_sheet,
                                           write_tactical_snapshot)
+from report.chan_chart           import write_chan_charts
 from backtest.engine             import run_all_backtests
 from backtest.report             import write_backtest_report
 from backtest.forward_tracker    import (
@@ -817,6 +818,16 @@ def run(non_interactive: bool = False,
     snap_path = write_tactical_snapshot(decisions, macro, portfolio, prices,
                                         date_str, output_dir, no_buy=forced_held)
     logger.info(f"  已写入: {snap_path}")
+
+    # 七巨头缠论 K 线图（近三月 + MA5/10/20 + 买卖点 as-of 重放，见 report/chan_chart.py）。
+    # 报告层的附加品：画不出来不该拖垮当日的交易报告，故捕获后继续 —— 但**大声报错**，
+    # 不静默吞掉（静默失败会让人以为图是最新的，其实还是昨天那张）。
+    try:
+        chart_path = write_chan_charts(prices, date_str, output_dir, pipeline=pipeline)
+        if chart_path:
+            logger.info(f"  已写入: {chart_path}")
+    except Exception:
+        logger.opt(exception=True).error("  缠论 K 线图生成失败（不影响其余报告）")
 
     logger.info("── 量化评分排行（按 score 降序）──")
     for r in sorted(quant_signals.values(), key=lambda x: x.score, reverse=True):
