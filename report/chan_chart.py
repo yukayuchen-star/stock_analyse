@@ -15,9 +15,21 @@
 于是图上只剩下事后看起来漂亮的买点 —— 这正是旧回测把缠论胜率算成 79.8%（诚实基线 53.2%
 < 随机 55.5%）的同一个幸存者偏差。**一张会骗人的图比没有图更糟**，所以这里宁可多花十几秒。
 
-代价：视窗 ~63 个交易日 × 8 只 ≈ 500 次缠论计算，实测约 **17 秒**。
+代价：视窗 ~128 个交易日 × 8 只 ≈ 1000 次缠论计算（2026-09-11 视窗改为**近六个月**）。
+
+📌 **中枢也走同一趟重放**（2026-09-11 加）：`current_pivot` 顺手收下来，
+按 ±1.2% 聚类成中枢带。**必须用发信号那一个中枢**，不能另用 `build_all_pivots`
+重算 —— 实测 MSFT 后者给 388.3~411.4、而发信号用的
+`find_latest_pivot(strokes, lookback=12)` 给 478.5~512.8，两者差一个量级，
+混用会让「b3 = 回踩中枢上沿 ZG」这句话在图上对不上。
+
+⚠️ **顺带查出的引擎行为**：`find_latest_pivot` 的中枢在相邻两日之间**会整个跳到
+另一个候选**，而不是缓慢延伸 —— AAPL 128 根 K 里换了 39 段，在
+200.53~214.74 与 256.20~279.27 之间反复横跳（lookback=12 的搜索窗随笔数平移，
+找到的是另一个中枢）。所以这里必须聚类 + 按活跃天数过滤，否则图上是几十个闪烁的框。
 
 📌 **实测副产品（2026-09-10，八只 / 近三个月）**：绝大多数信号**只活 1~2 天**
+（31 次首现里 22 次 ≈71% 在 ≤2 日内消失）
 （META 三个月里出了五次 s3，全是短命的；NVDA 七次首现里多次 ×1d）。
 所以本图把**信号存活天数编码成标记大小** —— 一眼就能看出某只票的结构是"稳"还是"天天翻脸"，
 这比单纯标一个三角形有用得多。它同时是 `insight_chan_right_edge` 那条记忆的可视化。
@@ -60,8 +72,18 @@ SLEEVE_LABEL = {
     "tactical": ("战术 sleeve · paper", "#0f766e"),
 }
 
-VIEW_MONTHS   = 3      # 视窗：近三个月
+VIEW_MONTHS   = 6      # 视窗：近六个月
 MIN_BARS_CHAN = 200    # compute_chan_signal 自身的硬下限
+
+# ── 中枢带的聚类与筛选 ────────────────────────────────────────
+# as-of 重放出来的 current_pivot **不是缓慢延伸，而是在两三个候选之间来回跳**
+# （实测 AAPL 128 根 K 里换了 39 段，在 200.53~214.74 与 256.20~279.27 之间反复横跳）——
+# 因为 `find_latest_pivot(strokes, lookback=12)` 的搜索窗随笔数变化而整体平移，
+# 找到的是**另一个**中枢而非同一个的延伸。逐段画会得到几十个闪烁的矩形。
+# 故按价位聚类：ZD 与 ZG 都在 ±PIVOT_TOL 内视为同一个中枢。
+PIVOT_TOL       = 0.012   # ±1.2%
+MIN_PIVOT_DAYS  = 5       # 活跃不足此天数的中枢不画（长尾全是 1~2 天的抖动）
+MAX_PIVOT_BANDS = 6       # 最多画几条，避免糊成一团；今日活跃的那条**永远**入选
 
 # 买点冷色、卖点暖色 —— **刻意不与红涨绿跌的蜡烛同色系**，否则标记会淹没在 K 线里。
 # b3 最亮：R4.2 重标定后只有 b3 期望为正（b1/b2 贴近保本线），亮度对应可信度。
@@ -79,9 +101,15 @@ MA_STYLE = [(5, "#f59e0b", 1.4), (10, "#8b5cf6", 1.4), (20, "#64748b", 1.6)]
 
 
 # ────────────────────────── as-of 重放 ──────────────────────────
-def _asof_markers(ticker: str, df: pd.DataFrame,
-                  view_dates: pd.DatetimeIndex) -> List[dict]:
-    """对视窗内每一天用 `df.loc[:t]` 重算缠论，返回信号**首现**记录。
+def _asof_replay(ticker: str, df: pd.DataFrame,
+                 view_dates: pd.DatetimeIndex) -> tuple[List[dict], List[dict]]:
+    """对视窗内每一天用 `df.loc[:t]` 重算缠论，返回 (买卖点首现, 中枢聚类)。
+
+    **一趟重放同时拿到两样东西**，中枢是顺手收的，不额外算一遍：
+    信号与中枽都来自同一次 `compute_chan_signal`，所以图上「b3 = 回踩中枢上沿 ZG」
+    这句话一定对得上 —— 若中枢改用 `build_all_pivots` 另算一遍就对不上了
+    （实测 MSFT：`build_all_pivots` 给 388.3~411.4，而发信号用的
+    `find_latest_pivot(lookback=12)` 给 478.5~512.8，差了一个量级）。
 
     信号会连续存在多天（结构没变就一直是那个 b3），逐日画会得到一串一样的三角形。
     这里只记**首现日**（= 你当天才会看到它、才可能据此动手的那一天），
@@ -93,7 +121,9 @@ def _asof_markers(ticker: str, df: pd.DataFrame,
     `alive` = 该信号是否一直活到视窗最后一根 K。
     """
     out: List[dict] = []
+    clusters: List[dict] = []
     prev: Optional[str] = None
+    today_key: Optional[tuple] = None
 
     for d in view_dates:
         sub = df.loc[:d]
@@ -104,6 +134,22 @@ def _asof_markers(ticker: str, df: pd.DataFrame,
         except Exception as e:                       # 单日失败不该毁掉整张图
             logger.debug(f"[Chart] {ticker} {d.date()} 缠论重算失败: {e}")
             continue
+
+        # ── 中枢：按价位聚类（理由见 PIVOT_TOL 处的注释）──────────
+        cp = res.current_pivot
+        if cp and cp.get("ZD") and cp.get("ZG"):
+            zd, zg = float(cp["ZD"]), float(cp["ZG"])
+            today_key = (zd, zg)
+            hit = next((c for c in clusters
+                        if abs(c["zd"] - zd) / zd < PIVOT_TOL
+                        and abs(c["zg"] - zg) / zg < PIVOT_TOL), None)
+            if hit:
+                hit["days"] += 1
+                hit["last"] = d
+                hit["zd"], hit["zg"] = min(hit["zd"], zd), max(hit["zg"], zg)
+            else:
+                clusters.append({"zd": zd, "zg": zg, "days": 1,
+                                 "first": d, "last": d})
 
         sig = res.buy_point_type or res.sell_point_type
         if sig != prev:
@@ -118,6 +164,9 @@ def _asof_markers(ticker: str, df: pd.DataFrame,
                     "confidence": float(res.confidence or 0.0),
                     "divergence": bool(res.divergence),
                     "stop_loss": res.stop_loss,
+                    # 发出该信号那一刻的中枢 —— hover 里给出，便于核对
+                    # 「b3 是不是真的贴着当时的 ZG」
+                    "pv": (round(cp["ZD"], 2), round(cp["ZG"], 2)) if cp else None,
                 })
             prev = sig
         elif sig and out:
@@ -125,7 +174,19 @@ def _asof_markers(ticker: str, df: pd.DataFrame,
 
     if out and prev:                 # 最后一段仍在 ⇒ 该信号活到今天
         out[-1]["alive"] = True
-    return out
+
+    # 标出今日活跃的那个中枢（= 今天发信号所依据的那个）
+    for c in clusters:
+        c["current"] = bool(
+            today_key
+            and abs(c["zd"] - today_key[0]) / today_key[0] < PIVOT_TOL
+            and abs(c["zg"] - today_key[1]) / today_key[1] < PIVOT_TOL
+        )
+    # 长尾全是 1~2 天的抖动，画出来只会糊；但今日活跃的那条**永远**保留，
+    # 哪怕它只活跃了一天（TSLA 实测就是这种情况）。
+    keep = [c for c in clusters if c["days"] >= MIN_PIVOT_DAYS or c["current"]]
+    keep.sort(key=lambda c: (not c["current"], -c["days"]))
+    return out, keep[:MAX_PIVOT_BANDS]
 
 
 def _marker_size(days: int) -> float:
@@ -135,24 +196,64 @@ def _marker_size(days: int) -> float:
 
 # ────────────────────────── 画图 ──────────────────────────
 def _build_figure(ticker: str, sleeve: str, view: pd.DataFrame,
-                  markers: List[dict], pivot: Optional[dict]):
+                  markers: List[dict], pivots: List[dict]):
     import plotly.graph_objects as go
 
     fig = go.Figure()
+    x0v, x1v = view.index[0], view.index[-1]
 
-    # 中枢带 —— 没有它 b3（"回踩中枢上沿 ZG"）这个标记根本没法读
-    if pivot and pivot.get("ZG") and pivot.get("ZD"):
-        fig.add_hrect(
-            y0=pivot["ZD"], y1=pivot["ZG"],
-            fillcolor="#94a3b8", opacity=0.13, line_width=0, layer="below",
-        )
-        for key, dash, txt in (("ZG", "dash", "ZG 中枢上沿"), ("ZD", "dot", "ZD 中枢下沿")):
-            fig.add_hline(
-                y=pivot[key], line=dict(color="#64748b", width=1, dash=dash),
-                annotation_text=f"{txt} {pivot[key]:.2f}",
-                annotation_position="right",
-                annotation_font=dict(size=10, color="#475569"),
-            )
+    # y 轴锁死在价格区间上。必须锁：中枢可能远在价格之外
+    # （实测 AAPL 现价 315，而今日操作中枢是 200.53~214.74），
+    # 不锁的话一条中枢带就能把所有蜡烛压成一条线。
+    lo, hi = float(view["Low"].min()), float(view["High"].max())
+    if markers:   # 标记画在 low×0.978 / high×1.022，且下方/上方还要留字，一并纳入
+        lo = min(lo, min(m["low"] * 0.978 for m in markers))
+        hi = max(hi, max(m["high"] * 1.022 for m in markers))
+    pad = (hi - lo) * 0.07
+    yrange = [lo - pad, hi + pad]
+
+    # ── 中枢带（虚线边框 + 阴影）──────────────────────────────
+    # 画成 Scatter 而非 shape：这样可 hover、可在图例里整组开关。
+    offscreen, hist_legend_done = [], False
+    for p in sorted(pivots, key=lambda c: c["current"]):
+        cur = p["current"]
+        a = max(p["first"], x0v)
+        b = x1v if cur else max(p["last"], a)          # 今日活跃的一路画到右缘
+        if p["zg"] < yrange[0] or p["zd"] > yrange[1]:  # 整条在视窗价格区间之外
+            offscreen.append(p)
+            continue
+        fig.add_trace(go.Scatter(
+            x=[a, b, b, a, a],
+            y=[p["zd"], p["zd"], p["zg"], p["zg"], p["zd"]],
+            mode="lines", fill="toself",
+            fillcolor="rgba(180,83,9,.13)" if cur else "rgba(100,116,139,.07)",
+            line=dict(color="#b45309" if cur else "#94a3b8",
+                      width=1.6 if cur else 1, dash="dash"),
+            name=("中枢·今日活跃" if cur else "中枢·历史"),
+            legendgroup="pivot_cur" if cur else "pivot_hist",
+            # 图例只给每组第一条**真正画出来的**band —— 绑在下标上会在
+            # 恰好该条离屏时把整组图例弄丢
+            showlegend=cur or not hist_legend_done,
+            hovertemplate=(
+                f"<b>中枢</b> {'（今日活跃）' if cur else '（历史）'}<br>"
+                f"ZG 上沿 {p['zg']:.2f}<br>ZD 下沿 {p['zd']:.2f}<br>"
+                f"活跃 {p['days']} 天 · {p['first']:%m-%d}→{p['last']:%m-%d}"
+                "<extra></extra>"
+            ),
+        ))
+        hist_legend_done = hist_legend_done or not cur
+
+    # 今日活跃中枢的 ZG/ZD 拉成全幅虚线 + 右侧价格标注（这两个价位是可操作的）
+    cur_p = next((p for p in pivots if p["current"]), None)
+    if cur_p and not any(p is cur_p for p in offscreen):
+        for key, dash, txt in (("zg", "dash", "ZG 上沿"), ("zd", "dot", "ZD 下沿")):
+            if yrange[0] <= cur_p[key] <= yrange[1]:
+                fig.add_hline(
+                    y=cur_p[key], line=dict(color="#b45309", width=1, dash=dash),
+                    annotation_text=f"{txt} {cur_p[key]:.2f}",
+                    annotation_position="right",
+                    annotation_font=dict(size=10, color="#b45309"),
+                )
 
     fig.add_trace(go.Candlestick(
         x=view.index, open=view["Open"], high=view["High"],
@@ -177,7 +278,13 @@ def _build_figure(ticker: str, sleeve: str, view: pd.DataFrame,
         fig.add_trace(go.Scatter(
             x=[m["date"] for m in pts],
             y=[m["low"] * 0.978 if m["kind"] == "buy" else m["high"] * 1.022 for m in pts],
-            mode="markers", name=f"{typ}（{len(pts)}）",
+            mode="markers+text", name=f"{typ}（{len(pts)}）",
+            # 三角形本身不够醒目 —— 每个标记旁边直接写出 b1/b2/b3 · s1/s2/s3
+            text=[m["type"] for m in pts],
+            textposition="bottom center" if symbol.endswith("up") else "top center",
+            textfont=dict(size=11, color=color,
+                          family="ui-monospace, SFMono-Regular, Menlo, monospace"),
+            cliponaxis=False,          # 贴边的标签不要被坐标轴裁掉
             marker=dict(
                 symbol=symbol, color=color,
                 size=[_marker_size(m["days"]) for m in pts],
@@ -188,13 +295,16 @@ def _build_figure(ticker: str, sleeve: str, view: pd.DataFrame,
             customdata=[[m["type"], desc, m["days"],
                          "仍在" if m["alive"] else "已消失",
                          m["close"], m["confidence"],
-                         "是" if m["divergence"] else "否"] for m in pts],
+                         "是" if m["divergence"] else "否",
+                         f"{m['pv'][0]:.2f}~{m['pv'][1]:.2f}" if m.get("pv") else "—",
+                         ] for m in pts],
             hovertemplate=(
                 "<b>%{customdata[0]}</b> · %{x|%Y-%m-%d}<br>"
                 "%{customdata[1]}<br>"
                 "收盘 %{customdata[4]:.2f}<br>"
                 "存活 <b>%{customdata[2]} 日</b>（%{customdata[3]}）<br>"
-                "结构置信度 %{customdata[5]:.2f} · 背驰 %{customdata[6]}"
+                "结构置信度 %{customdata[5]:.2f} · 背驰 %{customdata[6]}<br>"
+                "<i>当时中枢 %{customdata[7]}</i>"
                 "<extra></extra>"
             ),
         ))
@@ -202,7 +312,15 @@ def _build_figure(ticker: str, sleeve: str, view: pd.DataFrame,
     fleeting = sum(1 for m in markers if m["days"] <= 2)
     label, lcolor = SLEEVE_LABEL[sleeve]
     subtitle = (f"{len(markers)} 次信号首现，其中 <b>{fleeting}</b> 次 ≤2 日内消失"
-                if markers else "近三个月无缠论买卖点")
+                if markers else "近六个月无缠论买卖点")
+    if cur_p:
+        pos = ("价<b>在中枢之上</b>" if float(view["Close"].iloc[-1]) > cur_p["zg"]
+               else "价<b>在中枢之下</b>" if float(view["Close"].iloc[-1]) < cur_p["zd"]
+               else "价<b>在中枢之内</b>")
+        subtitle += (f"　·　今日中枢 {cur_p['zd']:.2f}~{cur_p['zg']:.2f}（{pos}）")
+    if offscreen:
+        subtitle += (f"　·　<span style='color:#b45309'>{len(offscreen)} 条中枢在"
+                     f"视窗价格区间之外未画</span>")
 
     fig.update_layout(
         title=dict(
@@ -211,7 +329,7 @@ def _build_figure(ticker: str, sleeve: str, view: pd.DataFrame,
                   f"　·　标记大小 = 信号存活天数　·　描边 = 该信号仍在</span>"),
             x=0.012, xanchor="left", font=dict(size=19, color="#0f172a"),
         ),
-        height=640, template="plotly_white",
+        height=680, template="plotly_white",
         margin=dict(l=56, r=140, t=88, b=44),
         xaxis=dict(
             rangeslider=dict(visible=False), showgrid=True,
@@ -220,7 +338,7 @@ def _build_figure(ticker: str, sleeve: str, view: pd.DataFrame,
             rangebreaks=[dict(values=_missing_days(view.index))],
         ),
         yaxis=dict(title="价格 (USD)", showgrid=True, gridcolor="#f1f5f9",
-                   side="right", tickformat=".2f"),
+                   side="right", tickformat=".2f", range=yrange),
         legend=dict(orientation="h", yanchor="bottom", y=1.005,
                     xanchor="right", x=1, font=dict(size=11)),
         hovermode="x unified", plot_bgcolor="white", paper_bgcolor="white",
@@ -283,13 +401,8 @@ def write_chan_charts(prices: Dict[str, pd.DataFrame], date_str: str,
             skipped.append(f"{ticker}(视窗为空)")
             continue
 
-        markers = _asof_markers(ticker, df, view.index)
-        try:
-            pivot = compute_chan_signal(ticker, {ticker: df}).current_pivot
-        except Exception:
-            pivot = None
-
-        fig = _build_figure(ticker, sleeve, view, markers, pivot)
+        markers, pivots = _asof_replay(ticker, df, view.index)
+        fig = _build_figure(ticker, sleeve, view, markers, pivots)
         div_id = f"chart_{ticker}"
         blocks.append(
             f'<div class="pane" id="pane_{ticker}" style="display:'
@@ -301,7 +414,8 @@ def write_chan_charts(prices: Dict[str, pd.DataFrame], date_str: str,
         )
         fleeting = sum(1 for m in markers if m["days"] <= 2)
         tabs.append((ticker, sleeve, len(markers), fleeting))
-        logger.debug(f"[Chart] {ticker}: {len(markers)} 次首现 / {fleeting} 次 ≤2日")
+        logger.debug(f"[Chart] {ticker}: {len(markers)} 次首现 / {fleeting} 次 ≤2日"
+                     f" / {len(pivots)} 条中枢带")
 
     if not blocks:
         logger.warning(f"[Chart] 无可绘制标的，跳过（{', '.join(skipped) or '原因未知'}）")
@@ -359,7 +473,7 @@ code{{background:#f1f5f9;padding:1px 5px;border-radius:4px;font-size:12px}}
 </style></head><body>
 <header>
 <h1>七巨头缠论 K 线图</h1>
-<p class="sub">as-of <b>{date_str}</b> · 近三个月 · 蜡烛红涨绿跌 ·
+<p class="sub">as-of <b>{date_str}</b> · 近六个月 · 蜡烛红涨绿跌 ·
  买卖点由 <code>compute_chan_signal</code> <b>逐日 as-of 重放</b>得出，
  <b>不是</b>用全历史几何回头标注（后者会抹掉被重画掉的失败笔 = R1.3 幸存者偏差）。
  页签上的数字是 <b>信号首现次数 / 其中 ≤2 日内消失的次数</b>。</p>
@@ -371,8 +485,14 @@ code{{background:#f1f5f9;padding:1px 5px;border-radius:4px;font-size:12px}}
 🟣 <b>卖点</b> s1 一卖(顶背驰) · s2 二卖 · s3 三卖</div>
 <div><b>标记大小 = 信号存活天数</b>（小 = 次日即消失，右端结构不稳）<br>
 <b>深色描边 = 该信号至今仍在</b>；无描边 = 已被后续 K 线重画掉</div>
-<div><b>灰带 = 当前中枢</b> ZD~ZG。b3 的定义就是"回踩中枢上沿"，
- 没有这条带子标记无法解读。</div>
+<div><b>虚线框 + 阴影 = 中枢</b>（ZD 下沿 ~ ZG 上沿）。<b style="color:#b45309">橙色 = 今日活跃</b>
+ （其 ZG/ZD 另拉全幅虚线并标价），灰色 = 视窗内出现过的历史中枢。
+ b3 的定义就是「回踩中枢上沿 ZG」，没有这条带子标记无法解读。</div>
+<div>⚠️ 中枢同样是 <b>as-of 重放</b>得到、并按 ±1.2% 聚类的：
+ <code>find_latest_pivot</code> 在相邻两日之间会<b>整个跳到另一个中枢</b>
+ （AAPL 实测 128 根 K 换了 39 段），不聚类会得到几十个闪烁的框。
+ 活跃 &lt;5 天的抖动不画，<b>但今日活跃的那条永远画</b>。
+ y 轴锁定在价格区间，落在区间外的中枢不画（标题会注明几条）。</div>
 <div>⚠️ 本图 <b>advisory / 只读</b>：不构成交易指令。核心 sleeve 的动作由三轴 AND 裁决给出，
  <b>缠论 s1/s2/s3 对底仓一律无效</b>。</div>
 </div>{note}
