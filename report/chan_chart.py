@@ -42,6 +42,7 @@
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -370,7 +371,19 @@ def write_chan_charts(prices: Dict[str, pd.DataFrame], date_str: str,
         import plotly.graph_objects as go       # noqa: F401
         import plotly.offline as pyo
     except ImportError:
-        logger.warning("[Chart] 未安装 plotly，跳过缠论 K 线图")
+        # ⚠️ ERROR 而非 WARNING（2026-09-14 升级）：这条曾以 WARNING 静默了两天 ——
+        # 09-12/09-14 的 main.py 都没出图，而日志看着像一次无害的 skip。
+        # 「静默降级」正是本项目反复吃亏的那类缺陷，图没出来就该像失败一样响。
+        #
+        # 而且原文案「未安装 plotly」**本身就在误导**：当时 plotly 装着（conda 3.13 里有
+        # 6.9.0），只是 main.py 跑在 .venv 3.12 上而那里没有。真正的根因是**解释器不是
+        # 你以为的那个**，所以这里必须把 sys.executable 打出来 —— 有这一行，两个环境的
+        # 问题当场就能看见，不必去翻日志猜。
+        logger.error(
+            f"[Chart] 缠论 K 线图未生成：当前解释器 {sys.executable} 里没有 plotly。"
+            f"（注意这不等于「没装过」——很可能装在了另一个解释器里。）"
+            f" 修复：uv pip install --python {sys.executable} 'plotly>=6.0'"
+        )
         return None
 
     charts_dir = output_dir / "charts"
