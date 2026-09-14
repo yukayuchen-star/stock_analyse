@@ -455,22 +455,88 @@ def _actual_basis(last: dict, fin: dict[str, pd.DataFrame]) -> dict:
 
 
 DRIFT_MIN_POINTS = 3    # 少于此观测数不下漂移结论
+DRIFT_LOG = Path("consensus_drift.jsonl")   # append-only，仓库根目录（同 pool_history.jsonl）
+
+_drift_cache: list | None = None
 
 
-def _revision_drift(ticker: str, asof: str) -> dict:
-    """整季的一致预期修正漂移 —— **数据早就在硬盘上，此前没有任何代码读它**。
+def _drift_rows() -> list:
+    """读 append-only 漂移日志（每进程只读一次）。"""
+    global _drift_cache
+    if _drift_cache is None:
+        rows = []
+        if DRIFT_LOG.exists():
+            for line in DRIFT_LOG.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:      # 坏行跳过，不让一行毁掉整段历史
+                    continue
+        _drift_cache = rows
+    return _drift_cache
 
-    动机（2026-08-28 审计）：`output/{date}/core_inputs.json` 每天都写了 `consensus`
-    快照，但只有 `eps_estimate_trend` 的 30d/90d 两个点被看见，**营收的修正漂移
-    完全不可见**。而修正方向是财报前信息量最高的公开信号之一（不是 edge——它公开、
-    已在价格里——但它是判断「市场预期在往哪走」的分母）。
 
-    口径：按日期升序取每天的 `next_quarter.revenue_avg` / `eps_avg` 与
-    `revisions_30d`，报首末值、变动幅度、观测天数。
+def _append_drift_point(ticker: str, asof: str, quarter: str | None, cons: dict) -> None:
+    """把当日的一致预期快照追加进 append-only 日志。
+
+    **为什么要单独落一份**（2026-09-14 修）：原实现从
+    `output/{date}/core_inputs.json` 重建漂移，而 `main.py` 每次运行都会调
+    `cleanup_old_files(KEEP_DAYS=7)` 把 7 天前的 `output/<date>/` 整个 rmtree ——
+    于是「整季漂移」这个声明**结构性地不可能达成**（窗口永远 ≤8 天，而一季 ~90 天）。
+    实测 2026-09-10 漂移从 4 点塌到 1 点、六只全打 `DRIFT_THIN`。
+
+    根因是**两段各自正确的代码在接缝处互相拆台**：`output/` 的清理策略是为了
+    「不积累冗余产物」，而这份快照是**审计数据**，两者的合理寿命根本不同。
+    `housekeeping` 的保护清单里本来就有 `pool_history.jsonl`（注明"审计/回放依赖"），
+    说明这个区分早被认识到，只是漏了这一份。故照它的做法单独 append-only 落盘 ——
+    清理只删 `output/<date>/` 目录，碰不到仓库根目录的文件。
+
+    **幂等**：同一个 (date, ticker) 已存在就不再追加，重跑当天不会写重。
+    """
+    nq = (cons.get("next_quarter") or {})
+    if not nq.get("revenue_avg"):
+        return
+    rows = _drift_rows()
+    if any(r.get("date") == asof and r.get("ticker") == ticker for r in rows):
+        return
+    rv = cons.get("revisions_30d") or {}
+    rec = {"date": asof, "ticker": ticker, "quarter": quarter,
+           "revenue_avg": nq.get("revenue_avg"), "eps_avg": nq.get("eps_avg"),
+           "up": rv.get("up"), "down": rv.get("down")}
+    try:
+        with DRIFT_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        rows.append(rec)                     # 同步进程内缓存，当日点立刻可见
+    except Exception as e:
+        logger.warning(f"[Core] 漂移日志写入失败 {ticker}: {e}")
+
+
+def _revision_drift(ticker: str, asof: str, quarter: str | None = None) -> dict:
+    """整季的一致预期修正漂移。
+
+    动机（2026-08-28 审计）：`consensus` 快照每天都写，但只有 `eps_estimate_trend`
+    的 30d/90d 两个点被看见，**营收的修正漂移完全不可见**。而修正方向是财报前
+    信息量最高的公开信号之一（不是 edge——它公开、已在价格里——但它是判断
+    「市场预期在往哪走」的分母）。
+
+    数据源（2026-09-14 改）：以 append-only 的 `consensus_drift.jsonl` 为主，
+    并**合并**尚存的 `output/*/core_inputs.json` 旧点（过渡期不丢历史），按日期去重。
+
+    ⚠️⚠️ **必须按季度分段**（2026-09-14 补）：`next_quarter` 指的是**下一个**季度，
+    公司一报财报它就整体滚到再下一季，`revenue_avg` 会**不连续跳变**。
+    原实现没有这道过滤 —— 7 天窗口下几乎跨不过财报日所以没暴露，
+    **一旦窗口拉到整季，把财报前后的点混在一起就会凭空造出一个巨大的假漂移**。
+    故只取 `quarter` 与当前一致的点；旧点没有 quarter 字段，按其必然落在 ≤8 天
+    保留窗口内（而最近财报在 44 天外）视为同季纳入。
+
     ⚠️ **只描述预期怎么变，不预测财报结果**；观测不足 `DRIFT_MIN_POINTS` 天时
     只给原始点、明确说不下结论（打 `DRIFT_THIN`）。
     """
-    pts = []
+    by_date: dict[str, dict] = {}
+
+    # 旧源：尚未被清理掉的 core_inputs.json（无 quarter 字段，见上方说明）
     for p in sorted(Path("output").glob("*/core_inputs.json")):
         day = p.parent.name
         if day > asof:
@@ -483,13 +549,26 @@ def _revision_drift(ticker: str, asof: str) -> dict:
         nq, rv = c.get("next_quarter") or {}, c.get("revisions_30d") or {}
         if not nq:
             continue
-        pts.append({"date": day, "revenue_avg": nq.get("revenue_avg"),
-                    "eps_avg": nq.get("eps_avg"),
-                    "up": rv.get("up"), "down": rv.get("down")})
+        by_date[day] = {"date": day, "revenue_avg": nq.get("revenue_avg"),
+                        "eps_avg": nq.get("eps_avg"),
+                        "up": rv.get("up"), "down": rv.get("down")}
+
+    # 主源：append-only 日志（同日期覆盖旧源，并施加季度过滤）
+    for r in _drift_rows():
+        if r.get("ticker") != ticker or (r.get("date") or "") > asof:
+            continue
+        if quarter and r.get("quarter") and r["quarter"] != quarter:
+            continue                          # 跨季的点一律不混进来
+        by_date[r["date"]] = {"date": r["date"], "revenue_avg": r.get("revenue_avg"),
+                              "eps_avg": r.get("eps_avg"),
+                              "up": r.get("up"), "down": r.get("down")}
+
+    pts = [by_date[d] for d in sorted(by_date)]
     if not pts:
         return {}
     out: dict = {"points": pts, "n_days": len(pts),
-                 "window": [pts[0]["date"], pts[-1]["date"]]}
+                 "window": [pts[0]["date"], pts[-1]["date"]],
+                 "quarter": quarter}   # 这段漂移属于哪一季（跨季的点已被滤掉）
     for k in ("revenue_avg", "eps_avg"):
         a, b = pts[0].get(k), pts[-1].get(k)
         if a and b:
@@ -868,7 +947,11 @@ def main() -> int:
 
         # ── 一致预期 / surprise（纯暴露，不进决策）──────────
         cons = _consensus(yft, fin)
-        drift = _revision_drift(t, date_str)
+        # 季度标签取自裁决表（gates 已在循环外加载）——漂移必须按季分段，理由见
+        # `_revision_drift` 的 docstring：next_quarter 会在财报后整体滚到下一季。
+        _dq = (gates.get(t) or {}).get("quarter")
+        _append_drift_point(t, date_str, _dq, cons)   # 先落盘，当日点才进得了窗口
+        drift = _revision_drift(t, date_str, _dq)
         if drift:
             cons["revision_drift"] = drift
             if drift.get("degraded"):
