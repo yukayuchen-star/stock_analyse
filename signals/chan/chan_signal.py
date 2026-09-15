@@ -174,7 +174,8 @@ def extract_chan_events(df: pd.DataFrame) -> List[ChanEvent]:
             continue
 
         sell_type, raw_score, _ = _detect_sell(
-            strokes, pivot, sub_hist, sub_df, sub_close)
+            strokes, pivot, sub_hist, sub_df, sub_close,
+            s3_requires_rebound=True)          # 美股侧启用缠论原义的三卖
         if sell_type != "none":
             if sell_type == "s1":
                 raw_score *= _trend_weight(trend)
@@ -361,14 +362,36 @@ def _detect_sell(
     hist:    pd.Series,
     df:      pd.DataFrame,
     close:   pd.Series,
+    s3_requires_rebound: bool = False,
 ) -> tuple[str, float, bool]:
-    """返回 (sell_type, raw_score, divergence)。score 已为负数。"""
+    """返回 (sell_type, raw_score, divergence)。score 已为负数。
+
+    `s3_requires_rebound`（2026-09-15 加）：s3 是否按缠论原义要求「离开中枢 + 回拉不进中枢」。
+
+    **默认 False = 旧行为**，这不是偷懒：`chan_signal_ashare` 直接 import 复用本函数，
+    默认改了就会**静默改变 A股行为**，而 A股有自己的回测基线、且按 CLAUDE.md
+    改 A股前须先读 skill `ashare-chan`。沿用 R4.2 的先例（A股钉住原分值、行为零变化），
+    **美股侧显式传 True，A股侧不动一行、自动保持原样**。
+    """
     last  = strokes[-1]
     price = float(close.iloc[-1])
 
-    # ── S3：价格跌破中枢ZD ─────────────────────────────────
-    if pivot and last.direction == "down":
-        if price < pivot.zd * 1.01 and last.low < pivot.zd:
+    # ── S3 ────────────────────────────────────────────────
+    # 缠论.md:414「第三类卖点是针对最后一个上涨中枢**回拉不进中枢**的点」
+    #   ⇒ 必须两步：① 前一笔向下**离开**中枢 ② 末笔回拉**不进**中枢。
+    # 旧实现只有「价格在中枢下方」——那是**中枢破位，不是三卖**，
+    # 且与 b3（严格实现了「离开 + 回踩不进」）完全不对称。实测 META 近半年 14 次 s3
+    # 全是「价待在中枢下沿之下」，**没有一次检验过回拉**。
+    if pivot and s3_requires_rebound and last.direction == "up" and len(strokes) >= 2:
+        prev = strokes[-2]
+        if (prev.direction == "down" and
+                prev.low < pivot.zd and               # ① 前一笔向下离开中枢
+                last.high <= pivot.zd * 1.01 and      # ② 回拉不进中枢（镜像 b3 的 ZG×0.99）
+                last.high >= pivot.zd * 0.80 and      # 距离下限（镜像 b3 的 ZG×1.20）
+                price <= pivot.zd * 1.01):
+            return "s3", -0.70, False
+    elif pivot and not s3_requires_rebound and last.direction == "down":
+        if price < pivot.zd * 1.01 and last.low < pivot.zd:   # 旧行为，A股沿用
             return "s3", -0.70, False
 
     # ── S2：反弹上升笔未过ZG，当前价格在中枢中轴下方 ──────
@@ -468,7 +491,8 @@ def compute_chan_signal(
                 strokes, latest_pivot, hist, df, close)
             if buy_type == "none":
                 sell_type, raw_score, diverge = _detect_sell(
-                    strokes, latest_pivot, hist, df, close)
+                    strokes, latest_pivot, hist, df, close,
+                    s3_requires_rebound=True)  # 美股侧启用缠论原义的三卖
 
         # ── 7. 趋势/盘整修正（仅作用于 1 类背驰）& 周线 & 共振 ──
         score = raw_score
