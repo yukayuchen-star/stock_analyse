@@ -187,7 +187,33 @@ def _asof_replay(ticker: str, df: pd.DataFrame,
     # 哪怕它只活跃了一天（TSLA 实测就是这种情况）。
     keep = [c for c in clusters if c["days"] >= MIN_PIVOT_DAYS or c["current"]]
     keep.sort(key=lambda c: (not c["current"], -c["days"]))
-    return out, keep[:MAX_PIVOT_BANDS]
+    keep = keep[:MAX_PIVOT_BANDS]
+
+    # ── 今日中枢的**真实构成笔跨度**（2026-09-15 修）──────────────
+    # `current_pivot` 只给 {ZD,ZG,mid,strokes计数}，**没有日期**，所以此前无从知道
+    # 这个中枢的构成笔到底什么时候就结束了 —— 于是图上一律画到右缘，把一个
+    # 早已不再纳入新笔的中枢标成「今日活跃」。实测 AAPL 的构成笔结束于
+    # 2025-12-09，却被画满到 2026-09-14：**虚画 279 天**。
+    # 故照 `compute_chan_signal` 的同一套管线（含 lookback=12）重算一次取 end_date。
+    cur = next((c for c in keep if c["current"]), None)
+    if cur is not None:
+        try:
+            from signals.chan.fractal import process_bars, detect_fractals
+            from signals.chan.stroke import build_strokes
+            from signals.chan.pivot import find_latest_pivot
+            sub = df.loc[:view_dates[-1]]
+            pv = find_latest_pivot(
+                build_strokes(detect_fractals(process_bars(sub))), lookback=12)
+            # ⚠️ 必须校验是同一个中枢再用它的日期。重算与重放若因任何原因分歧，
+            # **宁可不画延伸，也不要把别的中枢的日期安在这条带子上**。
+            if (pv is not None and pv.end_date is not None
+                    and abs(pv.zd - cur["zd"]) / cur["zd"] < PIVOT_TOL
+                    and abs(pv.zg - cur["zg"]) / cur["zg"] < PIVOT_TOL):
+                cur["stroke_end"] = pv.end_date
+                cur["stroke_start"] = pv.start_date
+        except Exception as e:                    # 取不到就不画延伸，不猜
+            logger.debug(f"[Chart] {ticker} 中枢跨度重算失败: {e}")
+    return out, keep
 
 
 def _marker_size(days: int) -> float:
@@ -218,8 +244,18 @@ def _build_figure(ticker: str, sleeve: str, view: pd.DataFrame,
     offscreen, hist_legend_done = [], False
     for p in sorted(pivots, key=lambda c: c["current"]):
         cur = p["current"]
-        a = max(p["first"], x0v)
-        b = x1v if cur else max(p["last"], a)          # 今日活跃的一路画到右缘
+        # ⚠️ 今日中枢用**构成笔的真实跨度** [stroke_start, stroke_end]，
+        # 而不是 first/last（那是「它在重放里作为最新中枢存在的那段日子」——
+        # 完全是另一回事，且 first 可能**晚于** stroke_end：中枢的笔先走完，
+        # 之后才因为迟迟形不成新中枢而"成为最新"。用 first 会画出零宽度带子）。
+        # 历史带没有重算跨度，仍用 first/last 的「操作窗口」口径，hover 里写明。
+        stale_from = p.get("stroke_end") if cur else None
+        if stale_from is not None:
+            a = max(p.get("stroke_start", p["first"]), x0v)
+            b = max(min(stale_from, x1v), a)
+        else:
+            a = max(p["first"], x0v)
+            b = x1v if cur else max(p["last"], a)
         if p["zg"] < yrange[0] or p["zd"] > yrange[1]:  # 整条在视窗价格区间之外
             offscreen.append(p)
             continue
@@ -236,13 +272,36 @@ def _build_figure(ticker: str, sleeve: str, view: pd.DataFrame,
             # 恰好该条离屏时把整组图例弄丢
             showlegend=cur or not hist_legend_done,
             hovertemplate=(
-                f"<b>中枢</b> {'（今日活跃）' if cur else '（历史）'}<br>"
+                f"<b>中枢</b> {'（今日最新）' if cur else '（历史）'}<br>"
                 f"ZG 上沿 {p['zg']:.2f}<br>ZD 下沿 {p['zd']:.2f}<br>"
-                f"活跃 {p['days']} 天 · {p['first']:%m-%d}→{p['last']:%m-%d}"
-                "<extra></extra>"
+                + (f"构成笔跨度 {a:%Y-%m-%d} → {b:%Y-%m-%d}"
+                   if stale_from is not None else
+                   f"作为最新中枢存在 {p['days']} 天 · {p['first']:%m-%d}→{p['last']:%m-%d}"
+                   "<br><i>（历史带为「操作窗口」口径，非构成笔跨度）</i>")
+                + "<extra></extra>"
             ),
         ))
         hist_legend_done = hist_legend_done or not cur
+
+        # 构成笔结束之后那一段：淡色点线，明示「仍是最新中枢，但已无新笔并入」
+        if stale_from is not None and stale_from < x1v:
+            stale_days = int((x1v - stale_from).days)
+            fig.add_trace(go.Scatter(
+                x=[stale_from, x1v, x1v, stale_from, stale_from],
+                y=[p["zd"], p["zd"], p["zg"], p["zg"], p["zd"]],
+                mode="lines", fill="toself",
+                fillcolor="rgba(180,83,9,.04)",
+                line=dict(color="#b45309", width=1, dash="dot"),
+                name="中枢·已无新笔并入",
+                legendgroup="pivot_stale", showlegend=True,
+                hovertemplate=(
+                    "<b>中枢已停更</b><br>"
+                    f"构成笔止于 {stale_from:%Y-%m-%d}<br>"
+                    f"此后 <b>{stale_days} 天</b>没有新笔并入<br>"
+                    "<i>它仍是 find_latest_pivot 返回的「最新中枢」，"
+                    "买卖点仍按它判定</i><extra></extra>"
+                ),
+            ))
 
     # 今日活跃中枢的 ZG/ZD 拉成全幅虚线 + 右侧价格标注（这两个价位是可操作的）
     cur_p = next((p for p in pivots if p["current"]), None)
@@ -255,6 +314,33 @@ def _build_figure(ticker: str, sleeve: str, view: pd.DataFrame,
                     annotation_position="right",
                     annotation_font=dict(size=10, color="#b45309"),
                 )
+
+    # ── 离屏的今日中枢：贴边提示（2026-09-15 加）────────────────────
+    # y 轴锁在价格区间上，中枢落在区间外就整条不画 —— 于是**最该被看见的那个反而
+    # 没有任何图形**：AAPL 的中枢 200.53~214.74 已 279 天无新笔并入，而现价 332，
+    # 它被裁掉后图上一片干净，看不出「买卖点正按一个九个月前的中枢在判」。
+    # 故贴着视窗上/下沿画一条提示带 + 箭头文字，把它拉回视野。
+    if cur_p is not None and any(p is cur_p for p in offscreen):
+        below = cur_p["zg"] < yrange[0]
+        px_now = float(view["Close"].iloc[-1])
+        edge = cur_p["zg"] if below else cur_p["zd"]
+        gap = abs(px_now - edge) / px_now * 100
+        se = cur_p.get("stroke_end")
+        stale = (f"，已 {int((x1v - se).days)} 天无新笔并入"
+                 if se is not None and se < x1v else "")
+        fig.add_annotation(
+            xref="paper", yref="paper",
+            x=0.5, y=(0.0 if below else 1.0),
+            xanchor="center", yanchor=("bottom" if below else "top"),
+            showarrow=False,
+            text=(f"{'↓' if below else '↑'} 今日中枢 "
+                  f"<b>{cur_p['zd']:.2f} ~ {cur_p['zg']:.2f}</b> 在视窗"
+                  f"{'下方' if below else '上方'}（距现价 {gap:.0f}%）{stale}"
+                  f"　—— 未画出，但<b>买卖点仍按它判定</b>"),
+            font=dict(size=11, color="#7c2d12"),
+            bgcolor="rgba(254,243,199,.92)",
+            bordercolor="#b45309", borderwidth=1, borderpad=4,
+        )
 
     fig.add_trace(go.Candlestick(
         x=view.index, open=view["Open"], high=view["High"],
@@ -319,6 +405,12 @@ def _build_figure(ticker: str, sleeve: str, view: pd.DataFrame,
                else "价<b>在中枢之下</b>" if float(view["Close"].iloc[-1]) < cur_p["zd"]
                else "价<b>在中枢之内</b>")
         subtitle += (f"　·　今日中枢 {cur_p['zd']:.2f}~{cur_p['zg']:.2f}（{pos}）")
+        se = cur_p.get("stroke_end")
+        if se is not None and se < x1v:
+            # 停更天数直接写进标题 —— 靠 hover 才看得见等于看不见，
+            # 而「这个中枢还新不新」恰恰决定了买卖点值不值得信。
+            subtitle += (f"，<span style='color:#b45309'>构成笔止于 {se:%m-%d}，"
+                         f"已 <b>{int((x1v - se).days)} 天</b>无新笔并入</span>")
     if offscreen:
         subtitle += (f"　·　<span style='color:#b45309'>{len(offscreen)} 条中枢在"
                      f"视窗价格区间之外未画</span>")
