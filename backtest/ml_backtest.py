@@ -321,6 +321,29 @@ class MLDataset:
     fwd_ret_col: str = "fwd_ret_5d"
 
 
+def _slice_panel_feats(panel: pd.DataFrame, ticker: str,
+                       index: pd.Index, columns: List[str]) -> pd.DataFrame:
+    """把 (date, ticker) 特征面板切到单个 ticker；取不到就补全 NaN 列。
+
+    ⚠️ **必须先确认索引真有 `ticker` 层**：`compute_timesfm_features` 与
+    `compute_dlinear_features` 在若干路径上返回 `pd.DataFrame(columns=FEATURE_COLUMNS)`
+    —— 普通 RangeIndex、**没有 `ticker` 层**。直接 `.index.get_level_values("ticker")`
+    会抛 `KeyError: Requested level (ticker) does not match index name (None)`。
+
+    这不是理论风险，正是模块 docstring 明写「本模块会就此告警，不静默降级」的那条路径：
+    `context=512` 配默认 14 个月预热时无任何 (date,ticker) 满足覆盖 —— 告警确实打了，
+    然后**崩在取 level 那一行**，永远走不到下面补 NaN 的兜底分支。
+    dlinear 侧的 `not rows`（所有块都 `continue`）同样在正常使用下可达。
+
+    补 NaN 而非跳过，是为了保证各 ticker 的列集合一致。
+    """
+    if (isinstance(panel.index, pd.MultiIndex)
+            and "ticker" in (panel.index.names or ())
+            and ticker in panel.index.get_level_values("ticker")):
+        return panel.xs(ticker, level="ticker").reindex(index)
+    return pd.DataFrame(index=index, columns=columns, dtype=float)
+
+
 def build_dataset(
     tickers: List[str],
     start: str = "2020-11-01",   # 比回测起点早 14m：覆盖 SMA200/vix_pct252 长窗口
