@@ -1,0 +1,18 @@
+# R10 —— TimesFM 时序基础模型特征（可选功能，主清单 requirements.txt 不含这些）
+#
+# 装这份之前先读 backtest/r10_precompute.py 的顶部说明：
+# 🔴 torch 与 lightgbm 在本机**不能同进程**（两个方向都 exit 139 段错误，
+#    KMP_DUPLICATE_LIB_OK / OMP_NUM_THREADS 均无效）。代码已改为子进程隔离，
+#    但这意味着**装了 torch 之后，任何新写的、在同一进程里同时用二者的代码都会崩**。
+#
+# 安装：
+#   pip install -r requirements-r10.txt
+#   uv pip install -e <本地 timesfm 副本路径>[torch]    # ← timesfm3，见下
+#
+# timesfm3 用的是本地已修复的副本而非 PyPI 上游：上游缺少全 NaN 序列告警与
+# max_variates 护栏（详见 PRD R10 §4）。因此它**无法从本文件复现** ——
+# 换机器时需要先把那个副本带过去。这是已知限制，不是遗漏。
+
+torch>=2.0
+httpx[socks]>=0.28            # 本机走 SOCKS 代理时 huggingface_hub 需要
+# timesfm[torch]>=3.0.1       # 由上面的可编辑安装提供，不从 PyPI 装

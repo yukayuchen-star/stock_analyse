@@ -24,3 +24,11 @@ plotly>=6.0                   # 七巨头缠论 K 线图（report/chan_chart.py�
 # P8 ML 回测
 lightgbm>=4.0
 scikit-learn>=1.3
+
+# P9 — R10 TimesFM 特征是**可选**的，依赖单列在 requirements-r10.txt。
+# 不放这里的三个理由：
+#   ① 代码把 torch 当可选（`--timesfm` 不传就完全不走那条路），依赖清单不该反过来
+#      强制每台机器装 ~1GB；跑每日管线的机器根本不 import ml_backtest。
+#   ② torch 装进主环境会让 `run_ml_backtest.py` 有段错误风险（见 r10_precompute.py）。
+#   ③ 真正需要的 timesfm3 只能从本地路径装，写进主清单也复现不出环境。
+#      装 R10：  pip install -r requirements-r10.txt
