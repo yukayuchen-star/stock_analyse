@@ -477,6 +477,42 @@ def _panel_fingerprint(panel: pd.DataFrame | None) -> str:
     return h.hexdigest()
 
 
+class LosslessFeatureCache:
+    """R10 特征的**无损**磁盘缓存（2026-09-17 立）。
+
+    🔴 不能复用 `data.cache.SQLiteCache`：它用 `to_json(orient="table")` 落盘，
+    pandas 默认 `double_precision=10` ⇒ **有损**。实测 560/560 行全部变动，
+    最大相对差 ~9e-7 —— 与 yfinance auto_adjust 抖动同量级，而那个量级已被实测
+    会翻动缠论买点数（658→660）。缓存若会改变数值，「命中」与「未命中」就是
+    两份不同的回测，本仓的 A/B 对拍验证契约当场失效。
+
+    故改用 pickle 逐位往返。键里已含面板数值指纹，输入一变即换键 ⇒ 无过期语义，
+    `ttl_hours` 只为兼容 `SQLiteCache` 的签名而接受，不使用。
+    """
+
+    def __init__(self, cache_dir: str = "cache/r10_features") -> None:
+        from pathlib import Path as _P
+
+        self.dir = _P(cache_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, key: str):
+        return self.dir / f"{key}.pkl"
+
+    def get(self, key: str):
+        p = self._path(key)
+        if not p.exists():
+            return None
+        try:
+            return pd.read_pickle(p)
+        except Exception as exc:  # noqa: BLE001 —— 缓存坏了就重算，绝不挡住计算
+            logger.warning(f"[TFM] 缓存文件损坏，改为重算: {exc}")
+            return None
+
+    def set(self, key: str, df: pd.DataFrame, ttl_hours: int | None = None) -> None:
+        df.to_pickle(self._path(key))
+
+
 def _cache_key(close_panel, cov_panel, cfg, start) -> str:
     from data.cache import SQLiteCache
 

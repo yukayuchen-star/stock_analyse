@@ -34,6 +34,27 @@ import sys
 from loguru import logger
 
 
+def _cache():
+    """TimesFM 特征缓存。取不到缓存绝不能挡住计算 —— 失败即返回 None 照常重算。
+
+    2026-09-17 补：此前这里**根本没传 cache**，`compute_timesfm_features` 的默认值
+    是 `cache=None`，于是 `_panel_fingerprint` 那套内容指纹缓存键在生产路径上是死代码，
+    同一份面板每次都要整整重算一遍（78 只 × 4.7 年 ≈ 17 分钟）。
+    键含面板数值指纹，输入一变就换键，所以复用是安全的。
+
+    🔴 用 `LosslessFeatureCache` 而**不是** `data.cache.SQLiteCache`：后者 to_json
+    落盘有损（实测 560/560 行变动、最大相对差 ~9e-7），接上去会让「缓存命中」与
+    「未命中」跑出两份不同的回测。理由详见那个类的 docstring。
+    """
+    try:
+        from backtest.timesfm_features import LosslessFeatureCache
+
+        return LosslessFeatureCache()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[R10] 缓存不可用，改为每次重算: {exc}")
+        return None
+
+
 def main(in_path: str, out_path: str) -> int:
     with open(in_path, "rb") as fh:
         spec = pickle.load(fh)
@@ -52,7 +73,9 @@ def main(in_path: str, out_path: str) -> int:
 
         cfg = TimesFMFeatureConfig(**spec["timesfm"])
         logger.info(f"[R10] 子进程：计算 TimesFM 特征 {cfg}")
-        out["tfm"] = compute_timesfm_features(close_panel, cov_panel, cfg, start=start)
+        out["tfm"] = compute_timesfm_features(
+            close_panel, cov_panel, cfg, start=start, cache=_cache()
+        )
         out["tfm_columns"] = list(TFM_COLUMNS)
 
     if spec.get("dlinear") is not None:

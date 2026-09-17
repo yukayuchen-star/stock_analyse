@@ -362,6 +362,7 @@ def _compute_r10_features(close_panel, cov_panel, timesfm_cfg, dlinear_cfg, star
     import subprocess
     import sys
     import tempfile
+    from collections import deque
     from pathlib import Path
 
     with tempfile.TemporaryDirectory(prefix="r10_") as td:
@@ -378,23 +379,33 @@ def _compute_r10_features(close_panel, cov_panel, timesfm_cfg, dlinear_cfg, star
                 fh,
             )
         logger.info("[R10] 启动子进程计算前瞻性特征（torch 与 lightgbm 不可同进程）...")
-        proc = subprocess.run(
+        # **流式**转发子进程日志，不用 capture_output。这活儿在 78 只 × 4.7 年的
+        # 规模上要跑十几分钟，一次性收集意味着这段时间外面完全静默 —— 分不清
+        # "在算" 和 "挂了"。stderr 合并进 stdout 是为了保持时序（loguru 写 stderr）。
+        proc = subprocess.Popen(
             [sys.executable, "-m", "backtest.r10_precompute", str(in_p), str(out_p)],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
+            bufsize=1,
         )
-        if proc.returncode != 0 or not out_p.exists():
-            tail = (proc.stderr or proc.stdout or "")[-2000:]
+        tail_lines: deque[str] = deque(maxlen=40)   # 失败时回放最后几十行即可
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            tail_lines.append(line)
+            logger.info(f"[R10-子进程] {line}")
+        rc = proc.wait()
+        if rc != 0 or not out_p.exists():
             hint = ""
-            if proc.returncode in (-11, 139):
-                hint = ("（退出码 139 = 段错误。若子进程里也出现，说明连'只有 torch'"
+            if rc in (-11, 139):
+                hint = ("（退出码 139 = 段错误。若子进程里也出现，说明连「只有 torch」"
                         "都崩了，请检查 torch 安装本身。）")
             raise RuntimeError(
-                f"[R10] 特征子进程失败 returncode={proc.returncode}{hint}\n{tail}"
+                f"[R10] 特征子进程失败 returncode={rc}{hint}\n" + "\n".join(tail_lines)
             )
-        if proc.stderr:
-            for line in proc.stderr.rstrip().splitlines():
-                logger.info(f"[R10-子进程] {line}")
         with open(out_p, "rb") as fh:
             got = pickle.load(fh)
     return got["tfm"], got["tfm_columns"], got["dlin"], got["dlin_columns"]

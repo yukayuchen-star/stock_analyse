@@ -550,3 +550,54 @@ class WindowStartPosTest(unittest.TestCase):
         self.assertEqual([full_k[i] for i in want], sub_k)
         np.testing.assert_array_equal(full_x[want], sub_x)
         self.assertLess(len(sub_k), len(full_k), "本测试须真的缩小了枚举范围")
+
+
+class LosslessCacheTest(unittest.TestCase):
+    """缓存往返必须**逐位无损**。
+
+    这条不变量不是洁癖：仓库的验证契约是 A/B 对拍（改动前后落盘产物 diff），
+    而一个有损的缓存会让「命中」与「未命中」跑出两份不同的回测 —— 到那时
+    对拍出来的差异既不是代码的也不是数据的，是缓存的。
+    `data.cache.SQLiteCache` 走 to_json(double_precision=10) 正是这种情况，
+    实测 560/560 行变动、最大相对差 ~9e-7（与 yfinance 复权抖动同量级）。
+    """
+
+    def _frame(self) -> pd.DataFrame:
+        rng = np.random.default_rng(20260917)
+        idx = pd.MultiIndex.from_product(
+            [pd.bdate_range("2024-01-01", periods=12), ["AAA", "BBB", "CCC"]],
+            names=["date", "ticker"],
+        )
+        data = {c: rng.standard_normal(len(idx)) * 10.0 ** rng.integers(-8, 3, len(idx))
+                for c in tfm.FEATURE_COLUMNS}
+        return pd.DataFrame(data, index=idx)
+
+    def test_roundtrip_is_bit_identical(self) -> None:
+        import tempfile
+
+        df = self._frame()
+        with tempfile.TemporaryDirectory() as td:
+            cache = tfm.LosslessFeatureCache(td)
+            cache.set("k1", df.reset_index())
+            got = cache.get("k1")
+        self.assertIsNotNone(got)
+        pd.testing.assert_frame_equal(df.reset_index(), got, check_exact=True)
+
+    def test_miss_returns_none(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            self.assertIsNone(tfm.LosslessFeatureCache(td).get("没有这个键"))
+
+    def test_sqlite_cache_would_have_been_lossy(self) -> None:
+        """反证：说明为什么不能复用 SQLiteCache —— 它的往返会改数值。"""
+        from io import StringIO
+
+        df = self._frame().reset_index()
+        rt = pd.read_json(StringIO(df.to_json(orient="table", date_format="iso")),
+                          orient="table").reset_index(drop=True)
+        same = all(
+            np.array_equal(df[c].to_numpy(), rt[c].to_numpy())
+            for c in tfm.FEATURE_COLUMNS
+        )
+        self.assertFalse(same, "若哪天 SQLiteCache 改成无损，这条可以删，缓存也可以换回去")
