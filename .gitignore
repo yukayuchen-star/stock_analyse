@@ -66,6 +66,11 @@ models/
 
 # Session exports & reference images (not source)
 *.txt
+# …但依赖清单是源码。requirements.txt 只是因为「已跟踪文件不受 gitignore 影响」
+# 才一直没出事；新建的 requirements-r10.txt 没有这层保护，会被 *.txt 静默吞掉
+# （2026-09-16 踩到：文件建好了、git status 里根本不出现）。
+!requirements.txt
+!requirements-r10.txt
 images/
 
 # macOS
