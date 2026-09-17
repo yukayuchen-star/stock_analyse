@@ -27,6 +27,15 @@ import pandas as pd
 import yfinance as yf
 from loguru import logger
 
+# ── 本模块**绝不导入 torch**（2026-09-16 实测后定的硬约束）────────────────
+# `.venv` 里有两份 libomp（torch/lib 与 sklearn/.dylibs）。实测两个方向都段错误：
+#   torch 先导入 → 之后 lightgbm 的 fit() **exit 139**
+#   lightgbm 先导入 → 之后 torch 前向 **exit 139**
+# KMP_DUPLICATE_LIB_OK / OMP_NUM_THREADS=1 / 两者同设，**全部无效**。
+# 曾经这里有一段 `try: import torch`（为让 torch 前向可用），它的代价是让
+# `run_ml_backtest.py` 自己段错误 —— 本文件的主业恰恰是 LightGBM 训练。
+# ⇒ R10 的 torch 特征改由子进程 `backtest.r10_precompute` 计算，见 `_compute_r10_features`。
+
 try:
     import lightgbm as lgb
     from sklearn.metrics import roc_auc_score
@@ -321,6 +330,76 @@ class MLDataset:
     fwd_ret_col: str = "fwd_ret_5d"
 
 
+def _as_config_dict(cfg) -> dict | None:
+    """把配置规范化成纯 dict，好送进子进程。
+
+    接受 dataclass 实例（`dataclasses.asdict` 不需要导入其类）或已经是 dict 的。
+    **父进程不得 import `backtest.dlinear_control`** —— 那会把 torch 拖进来，
+    理由见本文件顶部。传 dict 的调用方（如 `run_ml_backtest.py`）因此全程无 torch。
+    """
+    if cfg is None:
+        return None
+    if isinstance(cfg, dict):
+        return dict(cfg)
+    import dataclasses
+
+    if dataclasses.is_dataclass(cfg):
+        return dataclasses.asdict(cfg)
+    raise TypeError(f"无法识别的 R10 配置类型: {type(cfg)!r}")
+
+
+def _compute_r10_features(close_panel, cov_panel, timesfm_cfg, dlinear_cfg, start):
+    """在**子进程**里算 TimesFM / DLinear 特征，回传 (tfm_df, tfm_cols, dlin_df, dlin_cols)。
+
+    为什么不在本进程直接算：torch 与 lightgbm 的 libomp 冲突在本机**两个方向都段错误**，
+    且无任何环境变量可绕过（详见本文件顶部与 `backtest/r10_precompute.py`）。
+    子进程只导 torch、不导 lightgbm；父进程反之。
+
+    子进程失败一律**抛出**，绝不退化成"没有 R10 特征"静默继续 —— 那会让
+    `run_walk_forward` 跑出一份看起来正常、实则少了整组特征的结果。
+    """
+    import pickle
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory(prefix="r10_") as td:
+        in_p, out_p = Path(td) / "spec.pkl", Path(td) / "out.pkl"
+        with open(in_p, "wb") as fh:
+            pickle.dump(
+                {
+                    "close_panel": close_panel,
+                    "cov_panel": cov_panel,
+                    "timesfm": timesfm_cfg,
+                    "dlinear": dlinear_cfg,
+                    "start": start,
+                },
+                fh,
+            )
+        logger.info("[R10] 启动子进程计算前瞻性特征（torch 与 lightgbm 不可同进程）...")
+        proc = subprocess.run(
+            [sys.executable, "-m", "backtest.r10_precompute", str(in_p), str(out_p)],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0 or not out_p.exists():
+            tail = (proc.stderr or proc.stdout or "")[-2000:]
+            hint = ""
+            if proc.returncode in (-11, 139):
+                hint = ("（退出码 139 = 段错误。若子进程里也出现，说明连'只有 torch'"
+                        "都崩了，请检查 torch 安装本身。）")
+            raise RuntimeError(
+                f"[R10] 特征子进程失败 returncode={proc.returncode}{hint}\n{tail}"
+            )
+        if proc.stderr:
+            for line in proc.stderr.rstrip().splitlines():
+                logger.info(f"[R10-子进程] {line}")
+        with open(out_p, "rb") as fh:
+            got = pickle.load(fh)
+    return got["tfm"], got["tfm_columns"], got["dlin"], got["dlin_columns"]
+
+
 def _slice_panel_feats(panel: pd.DataFrame, ticker: str,
                        index: pd.Index, columns: List[str]) -> pd.DataFrame:
     """把 (date, ticker) 特征面板切到单个 ticker；取不到就补全 NaN 列。
@@ -349,10 +428,26 @@ def build_dataset(
     start: str = "2020-11-01",   # 比回测起点早 14m：覆盖 SMA200/vix_pct252 长窗口
     end: Optional[str] = None,
     backtest_start: str = "2022-01-01",
+    timesfm_config=None,
+    dlinear_config=None,
 ) -> MLDataset:
     """
     为每只股票下载数据、计算特征、拼接成训练矩阵。
     标签：5TD 后收益 > 0 → 1，否则 0。
+
+    Args:
+      timesfm_config: 传入 `backtest.timesfm_features.TimesFMFeatureConfig` 即启用
+        TimesFM 前瞻性特征（R10）。默认 None = 完全不启用，此时本函数的输出与接入
+        该特征之前**逐位一致**，`run_walk_forward` 结果可直接对照。
+      dlinear_config: 传入 `backtest.dlinear_control.DLinearConfig` 即启用 DLinear
+        对照特征。它是**对照组不是候选因子**：只用于判断 TimesFM 的预训练在漂移
+        通道上是否带来增量（见 PRD R10 §2.2）。
+
+    Note:
+      TimesFM 特征对历史不足 `context` 根的标的（IPO/分拆，如 ARM、SNDK）留 NaN 而
+      非填 0 —— 填 0 在 `tfm_qspread_5d` 上意味着"预测不确定性为零"，是个强烈且错误
+      的断言。但 `run_walk_forward` 在喂给 LightGBM 前统一做 `.fillna(0)`，故这些行
+      最终仍会变成 0。判读因子有效性时须结合 `[TFM] 覆盖率` 日志一起看。
     """
     if end is None:
         from utils.time_utils import today_str
@@ -399,6 +494,25 @@ def build_dataset(
     logger.info("[ML] 构建宏观特征 ...")
     macro_df = build_macro_features(start, end)
 
+    # R10 前瞻性特征（TimesFM + DLinear 对照）。**在子进程里算**：torch 与
+    # lightgbm 的 libomp 在本机两个方向都段错误，无环境变量可绕（见文件顶部）。
+    # `build_close_panel` 本身不碰 torch，可以在父进程调用。
+    tfm_feats = dlin_feats = None
+    tfm_columns: List[str] = []
+    dlin_columns: List[str] = []
+    tfm_cfg = _as_config_dict(timesfm_config)
+    dlin_cfg = _as_config_dict(dlinear_config)
+    if tfm_cfg is not None or dlin_cfg is not None:
+        from backtest.timesfm_features import build_close_panel
+
+        tfm_feats, tfm_columns, dlin_feats, dlin_columns = _compute_r10_features(
+            close_panel=build_close_panel(raw, valid_tickers),
+            cov_panel=build_close_panel(raw, BENCHMARKS),
+            timesfm_cfg=tfm_cfg,
+            dlinear_cfg=dlin_cfg,
+            start=backtest_start,
+        )
+
     rows: List[pd.DataFrame] = []
     for ticker in valid_tickers:
         df = raw[ticker]
@@ -411,6 +525,19 @@ def build_dataset(
         chan   = compute_chan_features(df)
 
         feats = pd.concat([tech, stat, rel, chan], axis=1)
+
+        if tfm_feats is not None:
+            # 未达覆盖要求的标的补全列但留 NaN，保证各 ticker 的列集合一致。
+            feats = pd.concat(
+                [feats, _slice_panel_feats(tfm_feats, ticker, df.index, tfm_columns)],
+                axis=1,
+            )
+
+        if dlin_feats is not None:
+            feats = pd.concat(
+                [feats, _slice_panel_feats(dlin_feats, ticker, df.index, dlin_columns)],
+                axis=1,
+            )
 
         # 对齐宏观
         if not macro_df.empty:
