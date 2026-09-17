@@ -159,7 +159,7 @@ python core_research.py   # 核心 sleeve（长线）预取
 
 #### 两本账彼此独立（`book.independent_from_core = true`）
 
-paper 的 `initial_capital` 与真金 `core_ledger.total_capital` **各自 $100k、互不相干**，
+paper 的 `initial_capital` 与真金 `core_ledger.total_capital` 是**两个互不相干的数**（数值即便相同也纯属巧合，**不构成合并的理由**），
 **合起来不是一本 70/30 的账**：战术的 `max_exposure_frac=0.30` 是 paper **自身权益**的 30%，
 核心的 70% 是真金 `total_capital` 的 70%。报告里两侧仓位**必须分列并标注资金账户**，
 **禁止**相加成一个「总仓位」——那个数没有对应任何一笔真实资金。
@@ -323,7 +323,9 @@ NVDA 连续四季 beat 且幅度单调扩大（3.5%→5.3%→5.5%→**6.2%**）�
 **命中后怎么做（写死，避免届时临时发挥）：**
 
 - 🔴 **任意两条命中 ⇒ thesis 破坏坐实 ⇒ 按政策减 1/3**，但 **`sell.max_sellable` 是硬上限**
-  （底仓下限锚定 `built_peak_shares`，会先 binding——如 NVDA 20 股减 1/3 = 6 股，卖后恰好等于下限 14）。
+  （底仓下限锚定 `built_peak_shares`，会先 binding——算例：某名 `built_peak` = 当前 = 100 股，
+  减 1/3 想卖 33 股，但下限 `0.70 × 100 = 70` 股 ⇒ `max_sellable` 只有 30 股，
+  照 33 股下单会击穿底仓。数字为示例，实际一律现算）。
   报告须附这条算术，不得只说「减 1/3」。
 - 🔴 **只命中一条 ⇒ 不减仓**，写进下一季观察项（**两点连不成线**——与 META 26Q2 利润率塌陷同一把尺子）。
 - 🟢 **命中不构成加仓理由。** 加速器只认「估值门 + 缠论买点」，
