@@ -521,8 +521,16 @@ def _revision_drift(ticker: str, asof: str, quarter: str | None = None) -> dict:
     信息量最高的公开信号之一（不是 edge——它公开、已在价格里——但它是判断
     「市场预期在往哪走」的分母）。
 
-    数据源（2026-09-14 改）：以 append-only 的 `consensus_drift.jsonl` 为主，
-    并**合并**尚存的 `output/*/core_inputs.json` 旧点（过渡期不丢历史），按日期去重。
+    数据源（2026-09-22 起**唯一**）：append-only 的 `consensus_drift.jsonl`。
+
+    🔴 **旧源 `output/*/core_inputs.json` 已移除，别再加回来**：它没有 `quarter` 字段
+    ⇒ **过不了下面那道季度过滤**，而它又与日志写进同一个 `by_date` ——
+    日志行被季度过滤 `continue` 掉时，**恰好就没有覆盖掉那条未过滤的旧点**，
+    于是过滤器被自己的兜底路径架空。实测（2026-09-22 复现）：财报跨季时
+    26Q3 与 26Q4 的点被混在一起，**凭空造出 +8.41% 的假漂移**。
+    移除是安全的：`housekeeping` 只保留 ≤ `KEEP_DAYS`(7) 天的 `output/<date>/`，
+    而日志自 2026-09-14 起逐日追加 ⇒ **任何尚存的旧点必然也在日志里**
+    （实测当日六只旧源独有日期均为 ∅）。
 
     ⚠️⚠️ **必须按季度分段**（2026-09-14 补）：`next_quarter` 指的是**下一个**季度，
     公司一报财报它就整体滚到再下一季，`revenue_avg` 会**不连续跳变**。
@@ -536,24 +544,7 @@ def _revision_drift(ticker: str, asof: str, quarter: str | None = None) -> dict:
     """
     by_date: dict[str, dict] = {}
 
-    # 旧源：尚未被清理掉的 core_inputs.json（无 quarter 字段，见上方说明）
-    for p in sorted(Path("output").glob("*/core_inputs.json")):
-        day = p.parent.name
-        if day > asof:
-            continue
-        try:
-            h = json.loads(p.read_text(encoding="utf-8")).get("holdings", {}).get(ticker) or {}
-        except Exception:
-            continue
-        c = h.get("consensus") or {}
-        nq, rv = c.get("next_quarter") or {}, c.get("revisions_30d") or {}
-        if not nq:
-            continue
-        by_date[day] = {"date": day, "revenue_avg": nq.get("revenue_avg"),
-                        "eps_avg": nq.get("eps_avg"),
-                        "up": rv.get("up"), "down": rv.get("down")}
-
-    # 主源：append-only 日志（同日期覆盖旧源，并施加季度过滤）
+    # 唯一源：append-only 日志（逐点施加季度过滤，理由见 docstring）
     for r in _drift_rows():
         if r.get("ticker") != ticker or (r.get("date") or "") > asof:
             continue
