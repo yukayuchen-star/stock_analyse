@@ -451,8 +451,14 @@ def _missing_days(idx: pd.DatetimeIndex) -> List[str]:
 
 # ────────────────────────── 入口 ──────────────────────────
 def write_chan_charts(prices: Dict[str, pd.DataFrame], date_str: str,
-                      output_dir: Path, pipeline=None) -> Optional[Path]:
-    """为 MAG8 生成缠论 K 线图，返回 html 路径（失败返回 None）。
+                      output_dir: Path, pipeline=None,
+                      names: Optional[List[tuple[str, str]]] = None,
+                      filename: str = "mag8_chan.html",
+                      title: str = "七巨头缠论 K 线图",
+                      notes: Optional[Dict[str, str]] = None) -> Optional[Path]:
+    """为 `names`（默认 MAG8）生成缠论 K 线图，返回 html 路径（失败返回 None）。
+
+    `notes`：可选，每只票一行 HTML，画在该页图的上方（战术前五用它写评级/风控标）。
 
     `prices` 直接复用 `main.py` 已在内存里的那一份（同一份 800 天缓存）——
     **不重新下载**。重新取一次就等于给项目造出第三份价格真相，
@@ -482,7 +488,7 @@ def write_chan_charts(prices: Dict[str, pd.DataFrame], date_str: str,
     charts_dir.mkdir(parents=True, exist_ok=True)
 
     blocks, tabs, skipped = [], [], []
-    for i, (ticker, sleeve) in enumerate(MAG8):
+    for i, (ticker, sleeve) in enumerate(names or MAG8):
         df = prices.get(ticker)
         if (df is None or df.empty) and pipeline is not None:
             try:                                  # 池轮动兜底：同一个 cache，不新开数据源
@@ -509,9 +515,11 @@ def write_chan_charts(prices: Dict[str, pd.DataFrame], date_str: str,
         markers, pivots = _asof_replay(ticker, df, view.index)
         fig = _build_figure(ticker, sleeve, view, markers, pivots)
         div_id = f"chart_{ticker}"
+        note_html = (f'<p class="note">{notes[ticker]}</p>'
+                     if notes and notes.get(ticker) else "")
         blocks.append(
             f'<div class="pane" id="pane_{ticker}" style="display:'
-            f'{"block" if i == 0 else "none"}">'
+            f'{"block" if not blocks else "none"}">' + note_html
             + fig.to_html(full_html=False, include_plotlyjs=False,
                           div_id=div_id, config={"displaylogo": False,
                                                  "scrollZoom": True})
@@ -526,15 +534,76 @@ def write_chan_charts(prices: Dict[str, pd.DataFrame], date_str: str,
         logger.warning(f"[Chart] 无可绘制标的，跳过（{', '.join(skipped) or '原因未知'}）")
         return None
 
-    out = charts_dir / "mag8_chan.html"
-    out.write_text(_render_shell(tabs, blocks, date_str, skipped, pyo),
+    out = charts_dir / filename
+    out.write_text(_render_shell(tabs, blocks, date_str, skipped, pyo, title),
                    encoding="utf-8")
     if skipped:
         logger.warning(f"[Chart] 跳过 {len(skipped)} 只: {', '.join(skipped)}")
     return out
 
 
-def _render_shell(tabs, blocks, date_str, skipped, pyo) -> str:
+TOP_N = 5
+
+
+def write_top_charts(decisions: Dict, prices: Dict[str, pd.DataFrame], date_str: str,
+                     output_dir: Path, pipeline=None, n: int = TOP_N) -> Optional[Path]:
+    """`daily_summary.md`「综合评级排行」里前 n 只**战术可选**名的缠论 K 线图。
+
+    产出 `output/{date}/charts/top5_chan.html`，画法与 mag8 完全相同（as-of 重放）。
+
+    **为什么剔除核心名与基准**：核心六只 + QQQ 在战术侧 `tactical_buyable=false`，
+    评级是分析结论不是下单指令，且它们已在 mag8 图里 —— 留着只会挤掉真正可选的短线名。
+    故这里的「第 k 名」是**剔除后**的名次，每页上方同时写出它在原排行里的名次。
+
+    **每页上方一行是必读的**：排行按 final_score（55% 缠论）排，而缠论分只看买点类型，
+    看不见「这个买点还能不能下手」—— R_MAX_EXCEEDED（止损太远，已降 Hold 清零）、
+    B3_WINDOW_PASSED（回踩窗口已过）都会让一只高分票**当下不可执行**。
+    量化的趋势/动量两个分项与缠论捕捉的是相反的边（insight_chan_vs_ml），
+    并列写出来是为了让两者分歧一眼可见，**不是**给它们重新加权。
+    """
+    from config.stocks import BENCHMARKS, CORE_HOLDINGS
+
+    ranked = sorted(decisions.values(), key=lambda d: d.final_score, reverse=True)
+    excluded = set(CORE_HOLDINGS) | set(BENCHMARKS)
+    picks = [(i + 1, d) for i, d in enumerate(ranked) if d.ticker not in excluded][:n]
+    if not picks:
+        logger.warning("[Chart] 战术前五：排行里没有可选名，跳过")
+        return None
+
+    notes = {}
+    for k, (orig, d) in enumerate(picks, 1):
+        c, q = d.chan_signal, d.quant_signal
+        bp = (c.buy_point_type or "—") if c else "—"
+        sp = (c.sell_point_type or "") if c else ""
+        weekly = getattr(c, "weekly_trend", "") if c else ""
+        r = (d.current_price - d.stop_loss) / d.current_price if d.current_price > 0 else None
+        parts = [f"<b>#{k}</b>（原排行 #{orig}）",
+                 f"<b>{d.rating}</b> {d.final_score:+.3f}",
+                 f"缠论 {bp}{'/' + sp if sp else ''} · 周线 {weekly or '—'}"]
+        if q is not None:
+            parts.append(f"量化 {q.score:+.2f}（趋势 {q.trend_score:+.2f} · 动量 {q.momentum_score:+.2f}）")
+        # 无缠论买点时 risk_overlay 的止损是 VIX 档百分比兜底，不是结构位 ——
+        # 那时写 R 就是把一个固定百分比冒充成结构风险，故只在有买点时给 R。
+        if c and c.buy_point_type:
+            parts.append(f"入场 {d.entry_price_range[0]:.2f}~{d.entry_price_range[1]:.2f} · "
+                         f"结构止损 {d.stop_loss:.2f}" + (f" · R {r:.1%}" if r is not None else ""))
+        else:
+            parts.append(f"无结构买点（止损 {d.stop_loss:.2f} 为百分比兜底，非结构位）")
+        warn = [f.split(":")[0] for f in d.risk_flags]      # 旗标格式 "NAME: 说明"
+        warn = [w for w in warn if w in ("R_MAX_EXCEEDED", "B3_WINDOW_PASSED", "HIGH_VOL",
+                                         "WEEKLY_DOWN", "MACRO_HEADWIND")]
+        if warn:
+            parts.append('<span class="warn">' + " · ".join(warn) + "</span>")
+        notes[d.ticker] = "　|　".join(parts)
+
+    return write_chan_charts(prices, date_str, output_dir, pipeline=pipeline,
+                             names=[(d.ticker, "tactical") for _, d in picks],
+                             filename="top5_chan.html",
+                             title=f"战术前{len(picks)}名缠论 K 线图", notes=notes)
+
+
+def _render_shell(tabs, blocks, date_str, skipped, pyo,
+                  title: str = "七巨头缠论 K 线图") -> str:
     """把八张图装进一个自包含 html（plotly.js 只内嵌一份 ≈4.9MB，离线可用）。"""
     btns = "".join(
         f'<button class="tab{" on" if i == 0 else ""}" data-t="{t}" '
@@ -545,7 +614,7 @@ def _render_shell(tabs, blocks, date_str, skipped, pyo) -> str:
     )
     note = (f'<p class="skip">⚠️ 跳过：{"、".join(skipped)}</p>' if skipped else "")
     return f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
-<title>七巨头缠论 K 线图 · {date_str}</title>
+<title>{title} · {date_str}</title>
 <script>{pyo.get_plotlyjs()}</script>
 <style>
 *{{box-sizing:border-box}}
@@ -574,10 +643,12 @@ main{{padding:20px 26px 40px}}
 .legend b{{color:#0f172a}}
 .legend div{{flex:1;min-width:230px}}
 .skip{{color:#b45309;font-size:12.5px;margin:12px 0 0}}
+.note{{margin:6px 10px 2px;font-size:13px;color:#334155}}
+.note .warn{{color:#b45309;font-weight:600}}
 code{{background:#f1f5f9;padding:1px 5px;border-radius:4px;font-size:12px}}
 </style></head><body>
 <header>
-<h1>七巨头缠论 K 线图</h1>
+<h1>{title}</h1>
 <p class="sub">as-of <b>{date_str}</b> · 近六个月 · 蜡烛红涨绿跌 ·
  买卖点由 <code>compute_chan_signal</code> <b>逐日 as-of 重放</b>得出，
  <b>不是</b>用全历史几何回头标注（后者会抹掉被重画掉的失败笔 = R1.3 幸存者偏差）。

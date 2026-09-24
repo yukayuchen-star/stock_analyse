@@ -36,7 +36,7 @@ from decision.portfolio_core     import (
 )
 from report.report_writer        import (write_all_reports, write_daily_action_sheet,
                                           write_tactical_snapshot)
-from report.chan_chart           import write_chan_charts
+from report.chan_chart           import write_chan_charts, write_top_charts
 from backtest.engine             import run_all_backtests
 from backtest.report             import write_backtest_report
 from backtest.forward_tracker    import (
@@ -828,6 +828,13 @@ def run(non_interactive: bool = False,
             logger.info(f"  已写入: {chart_path}")
     except Exception:
         logger.opt(exception=True).error("  缠论 K 线图生成失败（不影响其余报告）")
+    # 战术前五（综合评级排行剔除核心名/基准后的前 5，画法同上）
+    try:
+        top_path = write_top_charts(decisions, prices, date_str, output_dir, pipeline=pipeline)
+        if top_path:
+            logger.info(f"  已写入: {top_path}")
+    except Exception:
+        logger.opt(exception=True).error("  战术前五 K 线图生成失败（不影响其余报告）")
 
     logger.info("── 量化评分排行（按 score 降序）──")
     for r in sorted(quant_signals.values(), key=lambda x: x.score, reverse=True):
