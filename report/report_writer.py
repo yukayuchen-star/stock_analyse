@@ -456,7 +456,8 @@ def _daily_action_sheet(
               f"现金 ${cash:,.0f}（{cash/equity:.0%}）　累计盈亏 {cur['total_pnl_pct']:+.2%}",
               f"- 持仓上限 {MAX_PORTFOLIO_EXPOSURE:.0%}（战术 sleeve）→ 剩余可加仓额度约 **${max(0.0, MAX_PORTFOLIO_EXPOSURE*equity - mv):,.0f}**", ""]
     if positions:
-        L += ["| 代码 | 买入价 | 现价 | 浮盈 | 股数 | 市值 | 止损 |", "|--|--|--|--|--|--|--|"]
+        L += ["| 代码 | 买入价 | 现价 | 浮盈 | 股数 | 市值 | 止损 | 下次财报 |",
+              "|--|--|--|--|--|--|--|--|"]
         # 取信号日收盘价；取不到就**如实留空**，不再拿成本价冒充现价。
         # 旧写法 `if ... getattr(d, "current_price", 0) else pos["cost_price"]` 在
         # StockDecision 尚无该字段时恒走 else 分支 → 每一行都显示「现价=买入价、浮盈 +0.0%」，
@@ -474,8 +475,17 @@ def _daily_action_sheet(
             else:
                 # 无当日价：市值按成本计（与 portfolio_core._snapshot 的兜底同口径），并标注
                 px_s, pnl_s, mv_s = "—", "—", f"${pos['shares']*cost:,.0f}*"
+            # 财报隔夜跳空能越过收盘价止损，所以财报日和止损放在同一行（取不到留 —）
+            _d = decisions.get(code)
+            ed, dte = getattr(_d, "next_earnings", None), getattr(_d, "days_to_earnings", None)
+            if ed and dte is not None and dte >= 0:
+                earn_s = f"{ed}（{dte}TD）"
+                if any(str(f).startswith("EARNINGS_SOON") for f in _d.risk_flags):
+                    earn_s = f"⚠️ **{earn_s}**"
+            else:
+                earn_s = "—"
             L.append(f"| {code} | {cost:.2f} | {px_s} | {pnl_s} | "
-                     f"{pos['shares']} | {mv_s} | {sl} |")
+                     f"{pos['shares']} | {mv_s} | {sl} | {earn_s} |")
         if missing:
             L.append("")
             L.append(f"> \\* {'、'.join(missing)} 无当日价（不在本次扫描池或取价失败），"
@@ -679,6 +689,8 @@ def write_tactical_snapshot(
             "divergence_applied": bool(d.divergence_applied),
             "chan_sell_confirmed": bool(d.chan_sell_confirmed),
             "risk_flags": list(d.risk_flags),
+            "next_earnings": d.next_earnings,
+            "days_to_earnings": d.days_to_earnings,
             "score_reasoning": d.score_reasoning,
             "chan": ({
                 "score": round(float(c.score), 4),

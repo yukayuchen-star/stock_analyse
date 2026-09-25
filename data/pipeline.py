@@ -92,6 +92,9 @@ class DataPipeline:
     def get_earnings(self, ticker: str) -> pd.DataFrame:
         return self.av.get_income_quarterly(ticker)
 
+    def get_next_earnings(self, ticker: str) -> str | None:
+        return self.yf.get_next_earnings(ticker)
+
     # ── 基本面 info ────────────────────────────────────────
 
     def get_fundamentals(self, stock_pool: list[str] | None = None) -> dict[str, dict]:

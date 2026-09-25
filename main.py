@@ -11,7 +11,7 @@ from config.settings   import settings
 from config.stocks     import (
     STOCK_POOL, BENCHMARKS, BUCKETS,
     PORTFOLIO_INITIAL_CAPITAL, PORTFOLIO_LOT_SIZE, MAX_PORTFOLIO_EXPOSURE,
-    PORTFOLIO_TRANCHE_FRACTION, CORE_HOLDINGS,
+    PORTFOLIO_TRANCHE_FRACTION, CORE_HOLDINGS, EARNINGS_WINDOW_TD,
 )
 from config.pool_manager import (
     PoolChange, append_pool_changes, load_dynamic_pool, load_forced_held,
@@ -280,6 +280,33 @@ def _merge_watchlist(
         ))
         logger.info(f"  + {ticker} ← watchlist_us.txt → dynamic_pool [custom]")
     return changes
+
+
+def _annotate_earnings(decisions: Dict[str, StockDecision], held: set,
+                       date_str: str, pipeline: DataPipeline) -> None:
+    """填 next_earnings / days_to_earnings，窗口内的持仓票与 Buy/Overweight 票打 EARNINGS_SOON。
+
+    为什么需要：战术侧此前完全不看财报日，而结构止损是**收盘价**止损——
+    财报隔夜跳空可以直接越过它（NOW/LLY 两只 paper 持仓都在 10/28–29 发财报）。
+    只标这两类票：Hold 名打了也没有可执行的含义，全池都标就是一个永远亮着的告警。
+    核心名不标：它们的财报纪律在 core-holdings-research（≤5TD 暂缓基线）。
+    """
+    import numpy as np
+    n_flag = 0
+    for t, d in decisions.items():
+        ed = pipeline.get_next_earnings(t)
+        if not ed:
+            continue
+        d.next_earnings = ed
+        # 交易日数按工作日近似（不扣美股假日）：[今天, 财报日) 区间，明天发 = 1
+        d.days_to_earnings = int(np.busday_count(date_str, ed))
+        if (0 <= d.days_to_earnings <= EARNINGS_WINDOW_TD and t not in CORE_HOLDINGS
+                and (t in held or d.rating in ("Buy", "Overweight"))):
+            d.risk_flags.append(
+                f"EARNINGS_SOON: {d.days_to_earnings} 个交易日后发财报（{ed}，calendar 估计日），"
+                f"结构止损防不住隔夜跳空")
+            n_flag += 1
+    logger.info(f"  财报窗口(≤{EARNINGS_WINDOW_TD}TD) 标记 {n_flag} 只")
 
 
 def _paper_held() -> List[str]:
@@ -759,6 +786,9 @@ def run(non_interactive: bool = False,
 
     # ── 模拟组合：按策略信号自动买卖、跨日追踪（不改策略，仅记账）──
     portfolio = _run_portfolio(decisions, prices, date_str, no_buy=forced_held)
+
+    # 财报窗口标记放在记账**之后**：结构上保证它只进呈现层、改不了任何一笔买卖
+    _annotate_earnings(decisions, set(portfolio.get("positions", {})), date_str, pipeline)
     pf_cur = portfolio["history"][-1]
     logger.info(
         f"── 模拟组合 ── 权益 ${pf_cur['equity']:,.0f} "

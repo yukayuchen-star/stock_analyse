@@ -166,6 +166,31 @@ class YFinanceSource:
             logger.warning(f"yfinance info error [{ticker}]: {e}")
             return {}
 
+    # ── 下次财报日 ────────────────────────────────────────
+    TTL_EARNINGS = 24   # calendar 是公司确认前会漂移的**估计日**，按日刷新
+
+    def get_next_earnings(self, ticker: str) -> str | None:
+        """yfinance calendar 的下次财报日（YYYY-MM-DD）；ETF / 取不到返回 None。
+
+        「无财报日」也写缓存（空串）：否则 ETF 与失败名每轮都会重新发一次请求。
+        但**异常不写缓存**——网络抖动不应把一只有财报的票标成「无」整整一天。
+        """
+        key = self.cache.make_key("yf_next_earnings", ticker)
+        cached = self.cache.get(key)
+        if cached is not None:
+            v = cached.iloc[0]["next_earnings"]
+            # 缓存经 JSON 往返，空串可能回来成 NaN/None —— str(nan) 是真值 "nan"
+            return str(v)[:10] if pd.notna(v) and str(v) else None
+        try:
+            cal = yf.Ticker(ticker).calendar
+            ed = cal.get("Earnings Date") if isinstance(cal, dict) else None
+            v = str(ed[0])[:10] if ed else ""
+        except Exception as e:
+            logger.warning(f"yfinance calendar error [{ticker}]: {e}")
+            return None
+        self.cache.set(key, pd.DataFrame([{"next_earnings": v}]), ttl_hours=self.TTL_EARNINGS)
+        return v or None
+
     # ── 宏观（不支持）────────────────────────────────────
 
     def get_macro(self, series_id: str) -> pd.DataFrame:

@@ -38,6 +38,10 @@ class StockDecision:
     # 于是 report_writer 的 `getattr(d, "current_price", 0)` 恒取到 0、
     # 「今日操作.md」持仓表的现价/浮盈两列永远回落成买入价/+0.0%（2026-08-29 修）。
     current_price:      float = 0.0
+    # 下次财报日（yfinance calendar 估计日）与距今交易日数；main.py 在组合记账**之后**填，
+    # 故不影响任何买卖。取不到 / ETF 为 None——如实留空，不猜。
+    next_earnings:      Optional[str] = None
+    days_to_earnings:   Optional[int] = None
 
     # 原始信号引用
     chan_signal:  Optional[ChanSignalResult]  = None

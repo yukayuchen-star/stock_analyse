@@ -561,7 +561,7 @@ def write_top_charts(decisions: Dict, prices: Dict[str, pd.DataFrame], date_str:
     量化的趋势/动量两个分项与缠论捕捉的是相反的边（insight_chan_vs_ml），
     并列写出来是为了让两者分歧一眼可见，**不是**给它们重新加权。
     """
-    from config.stocks import BENCHMARKS, CORE_HOLDINGS
+    from config.stocks import BENCHMARKS, CORE_HOLDINGS, EARNINGS_WINDOW_TD
 
     ranked = sorted(decisions.values(), key=lambda d: d.final_score, reverse=True)
     excluded = set(CORE_HOLDINGS) | set(BENCHMARKS)
@@ -592,6 +592,12 @@ def write_top_charts(decisions: Dict, prices: Dict[str, pd.DataFrame], date_str:
         warn = [f.split(":")[0] for f in d.risk_flags]      # 旗标格式 "NAME: 说明"
         warn = [w for w in warn if w in ("R_MAX_EXCEEDED", "B3_WINDOW_PASSED", "HIGH_VOL",
                                          "WEEKLY_DOWN", "MACRO_HEADWIND")]
+        # 前五是「考虑入场」的名单，评级多为 Hold、拿不到 EARNINGS_SOON 旗标，故按天数直接判
+        dte = d.days_to_earnings
+        if d.next_earnings and dte is not None and dte >= 0:
+            parts.append(f"下次财报 {d.next_earnings}（{dte}TD）")
+            if dte <= EARNINGS_WINDOW_TD:
+                warn.append("EARNINGS_SOON")
         if warn:
             parts.append('<span class="warn">' + " · ".join(warn) + "</span>")
         notes[d.ticker] = "　|　".join(parts)
