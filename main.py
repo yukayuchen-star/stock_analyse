@@ -52,6 +52,11 @@ from backtest.factor_forward_amihud import (
     evaluate_amihud_pending,
     write_amihud_forward_report,
 )
+from backtest.factor_forward_revision import (
+    log_revision_events,
+    evaluate_revision_pending,
+    write_revision_forward_report,
+)
 from utils.time_utils   import today_str, prev_trading_day, is_trading_day
 from utils.housekeeping import cleanup_old_files
 
@@ -588,6 +593,8 @@ def run(non_interactive: bool = False,
     evaluate_factor_pending(pipeline)
     # R7 amihud=压力-beta OOS：评估满 20TD 的横截面因子事件
     evaluate_amihud_pending(pipeline)
+    # R11 EPS 修正 OOS：评估满 20TD 的周快照
+    evaluate_revision_pending(pipeline)
     # R8 大盘择时 OOS：评估满 20TD 的择时事件（前向指数收益）
     evaluate_vix_timing_pending(pipeline)
 
@@ -816,6 +823,8 @@ def run(non_interactive: bool = False,
     log_breakout_events(prices=prices, date_str=date_str, tickers=set(final_pool))
     # R7 amihud=压力-beta OOS：as-of 记录验证宇宙每票 amihud + 当日 VIX 制度（自载宇宙、独立于扫描池）
     log_amihud_events(date_str=date_str, pipeline=pipeline)
+    # R11 EPS 修正 OOS：按周快照验证宇宙的一致预期修正（Yahoo 无历史，只能向前记，绝不回填）
+    log_revision_events(date_str=date_str, pipeline=pipeline)
     # R8 大盘择时 OOS：记录当日 live 触发（SETUP/CONFIRMED/WARNING）+ 指数入场价（绝不回填）
     log_vix_timing_event(date_str=date_str, swing=macro.swing_timing, index_prices=prices)
 
@@ -892,6 +901,7 @@ def run(non_interactive: bool = False,
     logger.info(f"  前向验证报告: {fv_path}")
     write_factor_forward_report(date_str, output_dir)
     write_amihud_forward_report(date_str, output_dir)
+    write_revision_forward_report(date_str, output_dir)
     write_vix_timing_forward_report(date_str, output_dir)
 
     # ── 落盘：池快照 + 变更日志 ──────────────────────────

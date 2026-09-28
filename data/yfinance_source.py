@@ -191,6 +191,65 @@ class YFinanceSource:
         self.cache.set(key, pd.DataFrame([{"next_earnings": v}]), ttl_hours=self.TTL_EARNINGS)
         return v or None
 
+    TTL_EARNINGS_HIST = 24 * 7   # 已发生的财报日是历史事实，一周刷新一次足够
+
+    def get_earnings_history(self, ticker: str, limit: int = 28) -> list[str]:
+        """已发生的财报日（美东本地日期 YYYY-MM-DD，升序）；取不到返回 []。
+
+        只收 `Reported EPS` 非空的行 —— 未来的估计日也在同一张表里，不能混进「已发生」。
+        缓存/异常策略同 `get_next_earnings`：空结果也缓存，异常不缓存。
+        """
+        key = self.cache.make_key("yf_earnings_hist", ticker, str(limit))
+        cached = self.cache.get(key)
+        if cached is not None:
+            return sorted(str(d)[:10] for d in cached["date"] if pd.notna(d) and str(d))
+        try:
+            df = yf.Ticker(ticker).get_earnings_dates(limit=limit)
+        except Exception as e:
+            logger.warning(f"yfinance earnings_dates error [{ticker}]: {e}")
+            return []
+        dates: list[str] = []
+        if df is not None and not df.empty and "Reported EPS" in df.columns:
+            dates = sorted({str(ix)[:10] for ix in df.index[df["Reported EPS"].notna()]})
+        self.cache.set(key, pd.DataFrame({"date": dates or [""]}), ttl_hours=self.TTL_EARNINGS_HIST)
+        return dates
+
+    TTL_REVISIONS = 24
+
+    def get_eps_revisions(self, ticker: str) -> dict:
+        """分析师 EPS 一致预期的快照：`eps_trend`（当前 vs 30/90 天前）+ `eps_revisions`（30 天上/下修家数）。
+
+        只有**当日快照**，Yahoo 不给历史 —— 所以这些数只能向前逐日记录，不能回测。
+        返回 {period: {current,d30,d90,up30,down30}}，period ∈ {0q, 0y}；取不到返回 {}。
+        """
+        key = self.cache.make_key("yf_eps_revisions", ticker)
+        cached = self.cache.get(key)
+        if cached is not None:
+            return {r["period"]: {k: (None if pd.isna(r[k]) else float(r[k]))
+                                  for k in ("current", "d30", "d90", "up30", "down30")}
+                    for _, r in cached.iterrows() if r["period"]}
+        try:
+            t = yf.Ticker(ticker)
+            trend, rev = t.eps_trend, t.eps_revisions
+        except Exception as e:
+            logger.warning(f"yfinance eps_trend error [{ticker}]: {e}")
+            return {}
+        rows = []
+        for p in ("0q", "0y"):
+            tr = trend.loc[p] if trend is not None and not trend.empty and p in trend.index else {}
+            rv = rev.loc[p] if rev is not None and not rev.empty and p in rev.index else {}
+            if len(tr) == 0 and len(rv) == 0:
+                continue
+            rows.append({"period": p, "current": tr.get("current"), "d30": tr.get("30daysAgo"),
+                         "d90": tr.get("90daysAgo"), "up30": rv.get("upLast30days"),
+                         "down30": rv.get("downLast30days")})
+        df = pd.DataFrame(rows or [{"period": "", "current": None, "d30": None, "d90": None,
+                                    "up30": None, "down30": None}])
+        self.cache.set(key, df, ttl_hours=self.TTL_REVISIONS)
+        return {r["period"]: {k: (None if pd.isna(r[k]) else float(r[k]))
+                              for k in ("current", "d30", "d90", "up30", "down30")}
+                for _, r in df.iterrows() if r["period"]}
+
     # ── 宏观（不支持）────────────────────────────────────
 
     def get_macro(self, series_id: str) -> pd.DataFrame:
