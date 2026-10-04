@@ -1,0 +1,138 @@
+# 预注册：笔构建 v2（端点即极值优先）A/B 回测
+
+> **写定时间：2026-10-04（任何 v2 回测运行之前）**｜基线 commit `a8874bd`
+> 基线 `signals/chan/stroke.py` sha256 = `4c7b1ffca1de57be9d3cae494cd545cf4fd23480636c5f740b3ea468adc856bc`
+> 关联：`.claude/rules/chan.md`「仍待修 0」；用户 2026-10-04 裁定冲突规则 **A（间距优先）**。
+> ⚠️ **价值来源只有一条：写在结果之前。** 运行后不得修改本文件任何一节；
+> 若必须调整口径，只能在文末「变更记录」追加，并说明原因、时间、且该次结果降级为探索性。
+
+---
+
+## 1. 要回答的问题
+
+1. **正确性**：v2 是否在全宇宙满足「端点即极值」（规则 A 冲突类除外）且不破坏原三条不变量？
+2. **伤害检验**：换成 v2 后，忠于实盘出场的交易级结果是否**显著变差**？
+3. **根因假设**：现行实现的「中枢停更 / 逐日整体跳变」是否由笔过粗导致？（v2 下应显著缓解）
+4. **整条优先级链**：b1/b2/b3/s1/s2/s3 各自产出如何变化（不得只数某一环 —— 见 s3 教训）。
+
+**不回答**：v2 是否「更赚钱」。本修正是**正确性修复**，「改对了 ≠ 改好了」（同 2026-09-15 s3 先例）。
+
+## 2. 对照组（代码在本节冻结）
+
+| 组 | 定义 |
+|---|---|
+| **OLD** | `a8874bd` 的 `signals/chan/stroke.py:build_strokes`，原样 |
+| **NEW** | 下方 v2 代码，原样（冲突规则 A：间距优先，冲突时允许起点偏离极值） |
+
+两组**只换 `build_strokes`**：`process_bars` / `detect_fractals` / `find_latest_pivot` / `build_all_pivots` /
+买卖点判定 / 三重发射门 / `BUY_SCORES` / `R_MAX` / 出场规则**一律不动**。
+替换方式：运行期把 `signals.chan.chan_signal.build_strokes` 指向 NEW（实验脚本内 monkeypatch，**不改仓库代码**）。
+
+```python
+
+def _ext(a, b):  # a 是否比同类 b 更极端
+    return a.pb.high > b.pb.high if a.kind == "top" else a.pb.low < b.pb.low
+
+def build_v2(fr):
+    if len(fr) < 2: return []
+    ends = [fr[0]]          # 已确认端点序列（最后一个 = 当前笔起点 S）
+    j = 1
+    while j < len(fr):
+        S = ends[-1]
+        E = None; Ek = None   # 当前候选终点：起点之后最极端的反向分型（且与起点间距足够）
+        blk = None            # 起点之后最极端的反向分型（含间距不足的）—— E 必须不弱于它
+        sx = None             # 起点之后最极端、且比 S 更极端的同向分型（起点应移过去）
+        committed = False
+        for k in range(j, len(fr)):
+            f = fr[k]
+            if f.kind != S.kind:
+                if blk is None or not _ext(blk, f): blk = f
+                if f is blk:
+                    # 若期间出现比 S 更极端的同向分型，起点先移过去（保证起点也是极值）
+                    if sx is not None and sx.pbar_idx < f.pbar_idx:
+                        S = sx; ends[-1] = sx; sx = None
+                    if f.pbar_idx - S.pbar_idx >= MIN_BARS:
+                        E, Ek = f, k
+                    else:
+                        E, Ek = None, None
+            else:
+                if _ext(f, S) and (sx is None or _ext(f, sx)):
+                    if E is None:
+                        S = f; ends[-1] = f; blk = None; sx = None   # 笔未成，起点直接下移/上移
+                        continue
+                    sx = f
+                if E is not None and f.pbar_idx - E.pbar_idx >= MIN_BARS and (sx is None or sx is f):
+                    ends.append(E); j = Ek + 1; committed = True
+                    break
+        if not committed:
+            if E is not None and (sx is None or sx.pbar_idx < E.pbar_idx): ends.append(E)
+            break
+    # 前一笔终点若被后移，需同步：ends 已就地更新
+    out = []
+    for a, b in zip(ends, ends[1:]):
+        if a.kind != b.kind:
+            out.append(Stroke(a, b, "up" if a.kind == "bottom" else "down"))
+    return out
+```
+
+## 3. 数据（价格钉死）
+
+- **宇宙**：`backtest/ml_backtest.py:DEFAULT_UNIVERSE`（29 只，与 2026-09-16 重标定相同）。
+- **价格快照**：一次性下载后存 `output/prereg_stroke_v2/prices.pkl`（非日期目录，不被 7 天清理），
+  记录 sha256；**OLD 与 NEW 读同一份快照**（yfinance `auto_adjust` 每次下载重算，不钉死则 A/B 本就不可比）。
+- **主窗口**：信号日 **2022-01-03 ~ 2026-09-08**（与 9/16 相同；之前的数据只作预热）。
+- **补充窗口**（只报告，不进决策）：延长至快照最后一个交易日。
+- **复现性检查**：OLD 在新快照上的结果与 9/16 已落盘数（359 笔 / 胜率 41.8% / 均笔 +5.10% / 累计 +1830.1%）对比，
+  预期接近但不必逐字相等（价格快照不同）；偏差 >10% 须先查原因再看 A/B。
+
+## 4. 指标
+
+### 4.1 主指标（进入决策）
+
+| ID | 指标 | 口径 |
+|---|---|---|
+| **P1** | 端点非极值笔数（全宇宙，最终几何） | 处理 K 口径；NEW 只允许规则 A 冲突类，并逐条列出 |
+| **P2** | 交易级累计盈亏差 ΔCum = NEW − OLD | `backtest/engine.py` 忠于实盘出场；**逐票配对 bootstrap**，10,000 次，seed=20261004，报 95% CI 与 p |
+
+### 4.2 次指标（必须报告，不单独决策）
+
+- 交易级：笔数、胜率、均笔盈亏（含去首尾各 3 笔的截尾均值）、均持有天数。
+- **整条优先级链计数**：b1/b2/b3/s1/s2/s3 事件数 OLD vs NEW，及**同日改判矩阵**（OLD 判 X、NEW 判 Y 的天数）。
+- 事件级：各买点类型 5TD 胜率（Wilson 95% CI）vs 同窗口随机基准。
+- **结构诊断（检验根因假设）**：每只笔数、平均笔长（交易日）、
+  最新中枢距现价的距离、**中枢「停更天数」**（构成中枢的最后一笔结束距 as-of 的天数，逐月抽样取中位数）、
+  **中枢逐日跳变率**（相邻交易日 ZG/ZD 任一变动 >5% 的比例）。
+- **右端稳定性**：逐日 as-of 重放中「末笔方向隔夜翻转率」与「信号隔夜翻转率」。
+- `R_MAX` 降级比例（NEW 笔更细 ⇒ 预期结构止损更近、降级更少）。
+
+## 5. 决策规则（写死）
+
+| 门 | 条件 | 结果 |
+|---|---|---|
+| **G1 正确性** | P1：NEW 除规则 A 冲突类外违规 = 0，且间距/交替/相连三条违规 = 0 | 不过 ⇒ **停**，回第 1 步，不看收益 |
+| **G2 伤害** | P2 的 95% CI **整体 < 0**（显著变差） | ⇒ **停**，报告用户，**不合并**；须单独研究原因 |
+| | 95% CI 跨 0（不可区分） | ⇒ 可合并（正确性理由），**不得**写「有改善」 |
+| | 95% CI **整体 > 0** | ⇒ 可合并，**不得**宣称统计 edge（单宇宙、单窗口、事后修正） |
+| **G3 稳定性** | NEW 信号隔夜翻转率 > OLD 的 **2 倍** | ⇒ 合并前须单独评审右端护栏参数（`STROKE_CONFIRM_BARS` 等），**本次不调** |
+
+合并永远需要**用户最终裁定**；以上只决定「是否值得提请合并」。
+
+## 6. 范围与不变项
+
+- **只改美股**：若合并，`build_strokes` 增参数（如 `extreme_first: bool = False`，**默认旧行为**），
+  仅 `chan_signal.py` 的两个美股调用点（`compute_chan_signal`、`extract_chan_events`）显式启用 ——
+  沿用 R4.2 / s3「A 股钉住原行为」先例。A 股是否跟进须先读 skill `ashare-chan`。
+- `signals/quant/structure.py`（R6 研究用，未进实盘打分）保持旧行为。
+- **本次不重标定分值**：`BUY_SCORES`、`Buy≥0.50`、`DIV_CHAN_MIN`、`R_MAX` 原值不动。
+  NEW 下若各买点分布明显改变，重标定是**另一次预注册**。
+- 实盘切换日的预期副作用（若合并）：迟滞状态与 paper 持仓的结构止损会一次性跳变，须在当日报告中显式说明。
+
+## 7. 已知会被作废 / 需重述的基线
+
+R1.3（缠论 53.2% vs 随机）、R4.2 分值依据、2026-09-16 重跑与重标定的全部数字、
+`chan.md` 里所有以中枢位置为证据的结论（含 AAPL 停更 279 天、TSLA/AMZN 中枢分歧率）。
+**合并前这些数字保持原样引用并标注「建立在 OLD 笔上」**；合并后以本实验 NEW 结果替换。
+
+## 8. 变更记录（只追加）
+
+（空）

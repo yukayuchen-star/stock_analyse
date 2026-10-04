@@ -101,3 +101,8 @@ watchlist_us.txt  # 美股人工关注列表（个人数据，不入库）
 
 # 一致预期漂移 append-only 日志（审计数据，寿命独立于 output/ 的 7 天清理）
 consensus_drift.jsonl
+
+# 社媒投研（本地专用，不入公开仓库）：PRD、观点台账（append-only，寿命独立于 output/ 的 7 天清理）、博主名单
+PRD-social-research.md
+social_claims.jsonl
+creators.txt
