@@ -35,6 +35,17 @@ _VIX_DESC = {
 }
 
 
+def _rates_rows(r: dict | None) -> list[str]:
+    """宏观表里的两行只读利率（rates_context.py）；信号列写「不计分」，免得读者以为它进了 macro_score。"""
+    if not r:
+        return ["| 10Y 收益率（只读） | 不可得 | 不计分 |"]
+    seen = f"上次达到 {r['dgs10_level_last_seen']}" if r["dgs10_level_last_seen"] else "全序列最高"
+    return [
+        f"| 10Y 收益率（只读） | {r['dgs10']:.2f}%（{r['dgs10_asof']}，20 观测日 {r['dgs10_chg_bp']:+d}bp，{seen}） | 不计分 |",
+        f"| 实际利率代理 10Y−BE（只读） | {r['real_proxy']:.2f}%（{r['real_proxy_asof']}，20 观测日 {r['real_proxy_chg_bp']:+d}bp） | 不计分 |",
+    ]
+
+
 # ── 个股报告 ──────────────────────────────────────────────────
 
 def _stock_report(d: StockDecision, date_str: str) -> str:
@@ -223,6 +234,7 @@ def _daily_summary(
         f"| 加息预期 (2Y-FF) | {ext.rate_hike_gap:+.2f}pp | {ext.rate_hike_signal:+.2f} |",
         f"| 美元指数 DXY | {ext.dxy_level:.1f} (20d {ext.dxy_ret_20d:+.1%}) | {ext.dollar_signal:+.2f} |",
         f"| 通胀预期 BE10Y | {ext.breakeven_10y:.2f}% | {ext.inflation_signal:+.2f} |",
+        *_rates_rows(macro.rates),
         f"| 外部因子综合 | — | {ext.composite_score:+.2f} |",
         f"| **宏观得分** | — | **{macro_score}** |",
         "",
@@ -752,6 +764,7 @@ def write_tactical_snapshot(
             "position_limit": macro.position_limit,
             "chan_buy_allowed": _chan_buy_allowed(macro),
             "yield_spread": round(float(macro.yield_spread), 3),
+            "rates": macro.rates or None,   # 只读，不进 score（rates_context.py）
             "bucket_scores": {k: round(float(v), 3)
                               for k, v in (macro.bucket_scores or {}).items()},
             "swing_timing": ({"bottom_state": macro.swing_timing.bottom_state,

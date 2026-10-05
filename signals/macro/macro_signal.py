@@ -61,6 +61,10 @@ class MacroSignalResult:
     # R8 市场级 VIX 大盘拐点择时（第三轴：均值回归/制度反转；门控叠加非计分）
     swing_timing: Optional[VixTimingResult] = None
 
+    # 10Y 水平 + 实际利率代理（rates_context.py）：**只读呈现，不进 score**。
+    # 由调用方在算完 score 之后挂上，故意不放进 compute_macro_signal，防止日后被顺手加进打分。
+    rates: Dict = field(default_factory=dict)
+
     # 综合
     score:     float = 0.0   # -1~1
     reasoning: str   = ""

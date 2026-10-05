@@ -535,6 +535,13 @@ QQQ 无 thesis 风险、无一次性损益问题、无估值分位样本问题�
 快照须含**一行宏观**：`macro.vix` / `regime` / `panic_accelerator`
 （核心 sleeve 的唯一宏观输入；**不是**战术侧的 35% macro_score，口径区别见 §3.8）。
 
+紧跟一行**只读利率**：`macro.rates` 的 `dgs10`（及 `dgs10_level_last_seen`）/ `real_proxy`（10Y−BE10Y）/
+各自 20 个观测日的 bp 变动（2026-10-05 起，`signals/macro/rates_context.py`）。
+⚠️ **它不是门、不是加码器、不进三轴**——只回答「折现率环境在发生什么」，供读者自己判断。
+写法必须带「只读」二字。若 10Y 处于多年高位且上行主要来自实际利率，可在诚实边界里提示：
+估值带取样于更低利率时期，这条读数**只作背景、不改估值裁决**。
+`rates` 为 null 时（打 `RATES_CONTEXT_UNAVAILABLE`）写「利率上下文不可得」，不得手填数字。
+
 配了 `policy` 时快照须**多一行本月基线状态**：`monthly_baseline_usd` / `mtd_invested_usd` /
 `baseline_remaining_usd` / `baseline_allocation`，并附逐名 `target_usd`·`gap_usd`·`built_frac` 表
 与 `baseline_plan` 的逐名摊额表（含碎股/整股与 `sub_one_share` 提示）。汇总表里基线动作与

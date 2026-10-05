@@ -611,10 +611,23 @@ def _vix_view(cache) -> tuple[dict, list[str]]:
         vix = float(df["value"].dropna().iloc[-1])
         asof = str(df.index[-1])[:10] if hasattr(df.index[-1], "year") else None
         reg = classify_vix(vix)
-        return ({"vix": round(vix, 2), "vix_asof": asof, "regime": reg.regime,
-                 "position_limit": reg.position_limit,
-                 "chan_buy_allowed": chan_buy_threshold(reg),
-                 "panic_accelerator": vix >= 25.0}, [])
+        view = {"vix": round(vix, 2), "vix_asof": asof, "regime": reg.regime,
+                "position_limit": reg.position_limit,
+                "chan_buy_allowed": chan_buy_threshold(reg),
+                "panic_accelerator": vix >= 25.0}
+        # 10Y + 实际利率代理：只读呈现，不是门也不是加码器（2026-10-05，见 rates_context.py）。
+        # 单独 try：它取不到不能连累 VIX 那条加速器输入。
+        flags: list[str] = []
+        try:
+            from signals.macro.rates_context import compute_rates_context
+            fred = FREDSource(cache)
+            view["rates"] = compute_rates_context(fred.get_macro("DGS10")["value"],
+                                                  fred.get_macro("T10YIE")["value"])
+        except Exception:
+            view["rates"] = None
+        if not view["rates"]:
+            flags.append("RATES_CONTEXT_UNAVAILABLE(DGS10/T10YIE 缺失，10Y 与实际利率代理本次不呈现)")
+        return view, flags
     except Exception as e:
         return {}, [f"VIX_UNAVAILABLE({type(e).__name__} → 加速器的 VIX≥25 扳机本次无法判定)"]
 

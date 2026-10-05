@@ -21,6 +21,7 @@ from data.pipeline import DataPipeline
 from data.universe import get_universe
 from signals.quant.factor_engine import compute_quant_signal, QuantSignalResult
 from signals.macro.macro_signal  import compute_macro_signal
+from signals.macro.rates_context import compute_rates_context, rates_line
 from signals.macro.vix_timing_report import write_vix_timing_report
 from backtest.vix_timing_forward import (
     log_vix_timing_event, evaluate_vix_timing_pending, write_vix_timing_forward_report,
@@ -766,6 +767,16 @@ def run(non_interactive: bool = False,
         for _a in st.alerts:
             logger.warning(f"  {_a}")
     write_vix_timing_report(date_str, output_dir, macro.swing_timing)
+    # 10Y + 实际利率代理：只读呈现，score 已算完才挂上（2026-10-05，见 rates_context.py）
+    try:
+        macro.rates = compute_rates_context(pipeline.fred.get_macro("DGS10")["value"],
+                                            pipeline.fred.get_macro("T10YIE")["value"]) or {}
+    except Exception as _e:
+        logger.warning(f"  利率上下文失败: {_e}")
+    if not macro.rates:
+        macro.degraded.append("RATES_CONTEXT_UNAVAILABLE(DGS10/T10YIE 缺失，10Y 与实际利率代理本次不呈现)")
+    else:
+        logger.info(f"  利率（只读）: {rates_line(macro.rates)}")
 
     # ── P5 决策 ──────────────────────────────────────────
     logger.info("── P5 决策层 ──")
