@@ -34,6 +34,10 @@ STROKE_CONFIRM_BARS    = 2
 HIGH_VOL_PCT           = 0.06
 HIGH_VOL_EXTRA_CONFIRM = 2
 
+# 美股构笔用「端点即极值优先」（2026-10-04，PREREG-stroke-v2.md）。A股 chan_signal_ashare 不读它，
+# 保持旧构笔。report/chan_chart.py 重算中枢跨度时也读这里 —— 两处构笔必须同口径，否则图与信号对不上。
+STROKE_EXTREME_FIRST = True
+
 # ── 美股买点分值（R4.2 重标定 2026-07-14）─────────────────────────
 # 依据 2026-07-09 as-of 无偏回放基线（R1.3 修复幸存者偏差后）：
 #   P7 核心池 7%SL/2:1TP 撮合：b3 胜率 53.3%（唯一期望为正，≈+0.60R），
@@ -126,7 +130,7 @@ def extract_chan_events(df: pd.DataFrame) -> List[ChanEvent]:
         try:
             pbars    = process_bars(sub_df)
             fractals = detect_fractals(pbars)
-            strokes  = build_strokes(fractals)
+            strokes  = build_strokes(fractals, extreme_first=STROKE_EXTREME_FIRST)
         except Exception:
             continue
         if len(strokes) < 4:              # 与旧实现跳过前 3 笔对齐
@@ -443,7 +447,7 @@ def compute_chan_signal(
         # ── 1-3. 结构识别 ─────────────────────────────────────
         pbars    = process_bars(df)
         fractals = detect_fractals(pbars)
-        strokes  = build_strokes(fractals)
+        strokes  = build_strokes(fractals, extreme_first=STROKE_EXTREME_FIRST)
 
         if len(strokes) < 3:
             return ChanSignalResult(

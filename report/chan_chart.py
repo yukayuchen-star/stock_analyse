@@ -201,9 +201,11 @@ def _asof_replay(ticker: str, df: pd.DataFrame,
             from signals.chan.fractal import process_bars, detect_fractals
             from signals.chan.stroke import build_strokes
             from signals.chan.pivot import find_latest_pivot
+            from signals.chan.chan_signal import STROKE_EXTREME_FIRST
             sub = df.loc[:view_dates[-1]]
             pv = find_latest_pivot(
-                build_strokes(detect_fractals(process_bars(sub))), lookback=12)
+                build_strokes(detect_fractals(process_bars(sub)),
+                              extreme_first=STROKE_EXTREME_FIRST), lookback=12)
             # ⚠️ 必须校验是同一个中枢再用它的日期。重算与重放若因任何原因分歧，
             # **宁可不画延伸，也不要把别的中枢的日期安在这条带子上**。
             if (pv is not None and pv.end_date is not None
