@@ -27,6 +27,9 @@ description: 社媒投研 M2——把用户勾选的一条博主内容（文字 
 `core_inputs.json` 的 `financials` / `valuation`、裁决表、`consensus`。
 - **核上了** ⇒ `verified`；**对不上** ⇒ 写出差值和可能原因（口径、日期）；
 - **本机核不了**（如 10-K 客户集中度，sec.gov 不可达）⇒ `unverifiable`，**不得默认为真**。
+- **先查利益披露**：正文里出现 sponsored / 赞助 / paid partnership / 「thank you to X for sponsoring」等字样 ⇒
+  每条记录写 `sponsored: true` 和 `sponsor`；**赞助方的自报数字一律 `confidence=low`**，在卡片里只能写「X 自称」，
+  不得当事实引用。作者自己的分析判断可以保留原有可信度，但要注明这篇是赞助文（2026-10-05，Anastasi 华为赞助文立）。
 
 ### 3. 抽取观点记录（PRD §4.4 schema）
 

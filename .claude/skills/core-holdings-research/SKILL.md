@@ -520,7 +520,10 @@ VIX 是**加码器不是门**：panic_accelerator=true ⇒ tranche 可加大；f
 
 无公司 filings、无 thesis 减仓。仅估值带择时：`core_weighted_premium`（成分折溢价，
 已优先用成分的 `normalized_vs_mid`，`core_premium_normalized_n` 报有几只走了正常化口径）
-+ `dev_200dma_percentile` + 代理带。建议口径同底仓累积/极端高估 trim。
++ `dev_200dma_percentile` + 代理带。建议口径同底仓累积。
+⚠️ **QQQ 底仓不因 `price > extreme` 减仓**（2026-10-07 用户裁定，同 AAPL 9/28 先例，见 `sleeves.md`）：
+QQQ 本无 thesis 减仓，故**底仓没有任何减仓触发**；越过 extreme 只写位置描述。增强层高抛
+（`price ≥ ceiling` 且 s1/s2 顶背驰，不破 `base_floor_shares`）不受影响。
 QQQ 无 thesis 风险、无一次性损益问题、无估值分位样本问题，是**基线资金最省判断的载体**
 ——`policy` 里它的 `target_usd` 通常最大正是这个理由（`weighting_rationale` 记有原义）；
 它在 `baseline_plan` 里的摊额通常也最大，但那只是缺口占比的算术结果，不构成额外看多；
