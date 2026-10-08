@@ -451,16 +451,134 @@ def _missing_days(idx: pd.DatetimeIndex) -> List[str]:
     return [d.strftime("%Y-%m-%d") for d in full.difference(idx)]
 
 
+# ────────────────────────── 信号年龄 / 预备 b3 ──────────────────────────
+# 2026-10-08 探索性诊断（scratchpad，未预注册；29 只钉死价格 × 2022-01-03~2026-09-08，
+# 逐日标签与 prereg NEW2 记录对拍 32,439 天 0 差异）。用户问「能否预判谁要出买点、别再错过」：
+#   · b3 首现日收盘中位已在 ZG 之上 **+11.4%**、距回踩低点 +4.9%（低点→标签 3TD）——
+#     「错过」主要是标签按 15 个日历日新鲜度**在价格跑远后仍挂着**，不是发现得晚；
+#   · 预判**能**做到：proto-b3（下方定义）8TD 内转正式 b3 **57.7%**（173/300）；
+#   · 但**按预判提前下单更差**：proto 日买 f20 中位 −0.07%、胜 48.0%；在 ZG×1.03 挂限价等回踩
+#     −0.83%、胜 48.2%（回到 ZG 的多半是失败回踩）；确认日买 +0.46%、胜 52.2%；随机 +1.61%、胜 56.1%。
+# ⇒ 这两样只做**呈现**（用户 2026-10-08 批准）：不进任何打分、不给入场价、不是买入扳机。
+PROTO_STATS = dict(n=300, conv=173, window_td=8)
+PROTO_MAX_LOOKBACK = 10        # 往回数「已在该状态几天」最多数到这里
+
+
+def _signal_age_html(markers: List[dict], view: pd.DataFrame) -> str:
+    """今日仍活着的买点：首现日、距今几个交易日、首现后涨了多少、现价距发信号时的 ZG 多远。
+
+    排行只看「今天有没有 b3」，看不见它是今天刚出的还是一周前出的、价格已跑远 ——
+    这一行就是把这两者分开。"""
+    live = next((m for m in reversed(markers) if m["alive"] and m["kind"] == "buy"), None)
+    if live is None:
+        return ""
+    px = float(view["Close"].iloc[-1])
+    ago = int((view.index > live["date"]).sum())
+    s = (f"信号年龄：{live['type']} 首现于 {live['date']:%Y-%m-%d}（{ago} 个交易日前，"
+         f"首现收盘 {live['close']:.2f}），至今 {px / live['close'] - 1:+.1%}")
+    if live.get("pv"):
+        s += f"；现价距发信号时的 ZG {live['pv'][1]:.2f} {px / live['pv'][1] - 1:+.1%}"
+    stale = ago >= 3 or px / live["close"] - 1 >= 0.03
+    return f'<p class="note">{"<span class=warn>" if stale else ""}{s}{"</span>" if stale else ""}</p>'
+
+
+def _proto_b3(df: pd.DataFrame) -> Optional[dict]:
+    """几何上已满足 b3、但尚未出 b3 标签（=末笔未定笔 / 分型未停顿 / 已过新鲜度）。
+
+    定义与 2026-10-08 诊断**逐字相同**（改它就不能再引用 57.7% 那个数）：
+    有中枢 · 末笔 down · 前一笔 up 且高点 > ZG · ZG×0.99 ≤ 末笔低点 ≤ ZG×1.20 ·
+    现价 ≥ ZG×0.99 · 今日 buy_point ≠ b3。
+    """
+    from signals.chan.fractal import process_bars, detect_fractals
+    from signals.chan.stroke import build_strokes
+    from signals.chan.pivot import find_latest_pivot
+    from signals.chan.chan_signal import STROKE_EXTREME_FIRST
+
+    st = build_strokes(detect_fractals(process_bars(df)), extreme_first=STROKE_EXTREME_FIRST)
+    if len(st) < 3:
+        return None
+    pv = find_latest_pivot(st, lookback=12)
+    last, prev, px = st[-1], st[-2], float(df["Close"].iloc[-1])
+    if not (pv and last.direction == "down" and prev.direction == "up" and prev.high > pv.zg
+            and pv.zg * 0.99 <= last.low <= pv.zg * 1.20 and px >= pv.zg * 0.99):
+        return None
+    if compute_chan_signal("_", {"_": df}).buy_point_type == "b3":
+        return None
+    return dict(zg=pv.zg, zd=pv.zd, low=last.low, low_date=last.end_date, price=px)
+
+
+def proto_b3_watchlist(decisions: Dict, prices: Dict[str, pd.DataFrame],
+                       exclude: set, pipeline=None) -> List[dict]:
+    """全部战术可选名里处于 proto-b3 的票 + 已在该状态几天（诊断的转化率是从**进入**状态那天量的）。"""
+    rows = []
+    for t, d in decisions.items():
+        if t in exclude:
+            continue
+        df = prices.get(t)
+        if (df is None or df.empty) and pipeline is not None:
+            try:
+                df = pipeline.get_price(t)
+            except Exception:
+                df = None
+        if df is None or len(df) < MIN_BARS_CHAN + PROTO_MAX_LOOKBACK:
+            continue
+        df = df.sort_index()
+        try:
+            now = _proto_b3(df)
+            if now is None:
+                continue
+            days = 1
+            while days <= PROTO_MAX_LOOKBACK and _proto_b3(df.iloc[:-days]) is not None:
+                days += 1
+        except Exception as e:
+            logger.debug(f"[Chart] {t} proto-b3 判定失败: {e}")
+            continue
+        rows.append(dict(ticker=t, rating=d.rating, days=days, **now))
+    rows.sort(key=lambda r: (r["days"], r["ticker"]))
+    return rows
+
+
+def _proto_b3_html(rows: List[dict]) -> str:
+    s = PROTO_STATS
+    head = (f'<div class="watch"><h2>预备 b3 关注名单（{len(rows)} 只）—— 关注名单，<b>不是买入信号</b></h2>'
+            f'<p>几何上已满足三买（离开中枢后回踩、低点守在 ZG 之上），只差定笔 / 分型停顿。'
+            f'历史上从<b>进入此状态那天</b>起 {s["window_td"]} 个交易日内转成正式 b3 的比例 '
+            f'<b>{s["conv"] / s["n"]:.1%}</b>（{s["conv"]}/{s["n"]}）。'
+            f'<span class="warn">但在这一步就买，样本里 20 日中位 −0.07%、胜率 48%，'
+            f'不如等正式 b3（+0.46% / 52%）；挂在 ZG 附近等回踩更差（−0.83% / 48%）'
+            f'——提前知道是为了设提醒、备好方案，不是提前下单。</span>'
+            f'<br><small>出处：2026-10-08 探索性诊断，29 只 × 2022-01~2026-09，未预注册、无止损与成本、'
+            f'置信区间含 0；三种做法都不优于随机（+1.61% / 56%）。'
+            f'「已在状态」超过 {s["window_td"]} 天的，上面的转化率对它没有样本支撑。</small></p>')
+    if not rows:
+        return head + "<p>今日没有处于该状态的战术可选名。</p></div>"
+    body = "".join(
+        f'<tr><td><b>{r["ticker"]}</b></td><td>{r["rating"]}</td>'
+        f'<td>{">" if r["days"] > PROTO_MAX_LOOKBACK else ""}{min(r["days"], PROTO_MAX_LOOKBACK)}'
+        f'{" ⚠️" if r["days"] > s["window_td"] else ""}</td>'
+        f'<td>{r["price"]:.2f}</td><td>{r["zd"]:.2f} ~ {r["zg"]:.2f}</td>'
+        f'<td>{r["low"]:.2f}（{r["low_date"]:%m-%d}）</td><td>{r["low"] / r["zg"] - 1:+.1%}</td>'
+        f'<td>收盘 &lt; {r["zg"] * 0.99:.2f}</td></tr>'
+        for r in rows)
+    return (head + '<table><tr><th>票</th><th>今日评级</th><th>已在状态(TD)</th><th>现价</th>'
+            '<th>中枢 ZD~ZG</th><th>回踩低点</th><th>低点距 ZG</th><th>失效</th></tr>'
+            + body + "</table></div>")
+
+
 # ────────────────────────── 入口 ──────────────────────────
 def write_chan_charts(prices: Dict[str, pd.DataFrame], date_str: str,
                       output_dir: Path, pipeline=None,
                       names: Optional[List[tuple[str, str]]] = None,
                       filename: str = "mag8_chan.html",
                       title: str = "七巨头缠论 K 线图",
-                      notes: Optional[Dict[str, str]] = None) -> Optional[Path]:
+                      notes: Optional[Dict[str, str]] = None,
+                      signal_age: bool = False,
+                      extra_html: str = "") -> Optional[Path]:
     """为 `names`（默认 MAG8）生成缠论 K 线图，返回 html 路径（失败返回 None）。
 
     `notes`：可选，每只票一行 HTML，画在该页图的上方（战术前五用它写评级/风控标）。
+    `signal_age`：在 notes 下再写一行今日活跃买点的年龄（来自同一趟 as-of 重放，不另算）。
+    `extra_html`：插在图与图例之间的整块（战术前五用它放预备 b3 名单）。
 
     `prices` 直接复用 `main.py` 已在内存里的那一份（同一份 800 天缓存）——
     **不重新下载**。重新取一次就等于给项目造出第三份价格真相，
@@ -519,6 +637,8 @@ def write_chan_charts(prices: Dict[str, pd.DataFrame], date_str: str,
         div_id = f"chart_{ticker}"
         note_html = (f'<p class="note">{notes[ticker]}</p>'
                      if notes and notes.get(ticker) else "")
+        if signal_age:
+            note_html += _signal_age_html(markers, view)
         blocks.append(
             f'<div class="pane" id="pane_{ticker}" style="display:'
             f'{"block" if not blocks else "none"}">' + note_html
@@ -537,7 +657,7 @@ def write_chan_charts(prices: Dict[str, pd.DataFrame], date_str: str,
         return None
 
     out = charts_dir / filename
-    out.write_text(_render_shell(tabs, blocks, date_str, skipped, pyo, title),
+    out.write_text(_render_shell(tabs, blocks, date_str, skipped, pyo, title, extra_html),
                    encoding="utf-8")
     if skipped:
         logger.warning(f"[Chart] 跳过 {len(skipped)} 只: {', '.join(skipped)}")
@@ -604,14 +724,18 @@ def write_top_charts(decisions: Dict, prices: Dict[str, pd.DataFrame], date_str:
             parts.append('<span class="warn">' + " · ".join(warn) + "</span>")
         notes[d.ticker] = "　|　".join(parts)
 
+    watch = proto_b3_watchlist(decisions, prices, excluded, pipeline=pipeline)
+    logger.info(f"[Chart] 预备 b3 关注名单 {len(watch)} 只: "
+                f"{', '.join(r['ticker'] for r in watch) or '—'}")
     return write_chan_charts(prices, date_str, output_dir, pipeline=pipeline,
                              names=[(d.ticker, "tactical") for _, d in picks],
                              filename="top5_chan.html",
-                             title=f"战术前{len(picks)}名缠论 K 线图", notes=notes)
+                             title=f"战术前{len(picks)}名缠论 K 线图", notes=notes,
+                             signal_age=True, extra_html=_proto_b3_html(watch))
 
 
 def _render_shell(tabs, blocks, date_str, skipped, pyo,
-                  title: str = "七巨头缠论 K 线图") -> str:
+                  title: str = "七巨头缠论 K 线图", extra: str = "") -> str:
     """把八张图装进一个自包含 html（plotly.js 只内嵌一份 ≈4.9MB，离线可用）。"""
     btns = "".join(
         f'<button class="tab{" on" if i == 0 else ""}" data-t="{t}" '
@@ -653,6 +777,12 @@ main{{padding:20px 26px 40px}}
 .skip{{color:#b45309;font-size:12.5px;margin:12px 0 0}}
 .note{{margin:6px 10px 2px;font-size:13px;color:#334155}}
 .note .warn{{color:#b45309;font-weight:600}}
+.watch{{margin:16px 0 0;padding:14px 18px;background:#fff;border:1px solid #e2e8f0;
+ border-radius:10px;font-size:13px;color:#334155}}
+.watch h2{{margin:0 0 6px;font-size:15px}}
+.watch .warn{{color:#b45309}}
+.watch table{{border-collapse:collapse;margin-top:8px;font-variant-numeric:tabular-nums}}
+.watch th,.watch td{{border-bottom:1px solid #e2e8f0;padding:4px 10px;text-align:left}}
 code{{background:#f1f5f9;padding:1px 5px;border-radius:4px;font-size:12px}}
 </style></head><body>
 <header>
@@ -663,7 +793,7 @@ code{{background:#f1f5f9;padding:1px 5px;border-radius:4px;font-size:12px}}
  页签上的数字是 <b>信号首现次数 / 其中 ≤2 日内消失的次数</b>。</p>
 <div class="tabs">{btns}</div>
 </header>
-<main>{"".join(blocks)}
+<main>{"".join(blocks)}{extra}
 <div class="legend">
 <div>🔵 <b>买点</b> b1 一买(底背驰) · b2 二买(中枢下沿回踩) · b3 三买(中枢上沿回踩)<br>
 🟣 <b>卖点</b> s1 一卖(顶背驰) · s2 二卖 · s3 三卖</div>
