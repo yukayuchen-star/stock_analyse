@@ -247,15 +247,26 @@ GATES_PATH = "output/earnings_gates.json"
 
 
 def _load_gates() -> dict:
-    """财报前裁决表。文件不存在 = 整块缺席（skill 会提示补写），不生成模板。"""
+    """财报前裁决表 → {ticker: 当前季的表}。文件不存在 = 整块缺席（skill 会提示补写），不生成模板。
+
+    每名存**按季度的列表**（2026-10-22 起）：写新一季只能追加，旧表原样留作已冻结的检验记录
+    —— 单 dict 时写新季只能覆盖旧表，与「写死后一字不改」冲突。当前季 = `period_end` 最新的那条。
+    旧格式（单 dict）照读。
+    """
     p = Path(GATES_PATH)
     if not p.exists():
         return {}
     try:
-        return (json.loads(p.read_text(encoding="utf-8")) or {}).get("gates") or {}
+        raw = (json.loads(p.read_text(encoding="utf-8")) or {}).get("gates") or {}
     except Exception as e:
         logger.warning(f"[Core] earnings_gates 解析失败: {e}")
         return {}
+    out = {}
+    for t, v in raw.items():
+        entries = [v] if isinstance(v, dict) else [e for e in (v or []) if isinstance(e, dict)]
+        if entries:
+            out[t] = max(entries, key=lambda e: str(e.get("period_end") or ""))
+    return out
 
 
 def _gate_view(gate: dict | None, next_earnings: str | None) -> tuple[dict, list[str]]:
