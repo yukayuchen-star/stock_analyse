@@ -172,6 +172,7 @@
 
 **进度（2026-10-27）**：P1 F4 v1 REJECT（定义缺陷）→ 变更 1 F4′ 探索性 REJECT（t 1.69）→ 前向记录器上线（`PREREG-f4-forward.md`）；
 P2 F3 REJECT（EAR 冗余）。详见 `output/prereg_factor_v1/RESULTS.md`。
+P3 F5 回购强度前向记录器上线（`PREREG-f5-forward.md`，`backtest/factor_forward_buyback.py`，周快照，主口径 `bb_float × fwd20`，原始分量一并落库）。
 
 
 ---

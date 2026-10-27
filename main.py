@@ -63,6 +63,11 @@ from backtest.factor_forward_resmom import (
     evaluate_resmom_pending,
     write_resmom_forward_report,
 )
+from backtest.factor_forward_buyback import (
+    log_buyback_events,
+    evaluate_buyback_pending,
+    write_buyback_forward_report,
+)
 from utils.time_utils   import today_str, prev_trading_day, is_trading_day
 from utils.housekeeping import cleanup_old_files
 
@@ -603,6 +608,8 @@ def run(non_interactive: bool = False,
     evaluate_revision_pending(pipeline)
     # F4′ 残差动量 OOS：评估入场后满 20TD 的周记录
     evaluate_resmom_pending(pipeline)
+    # F5 回购强度 OOS：评估入场后满 60TD 的周快照
+    evaluate_buyback_pending(pipeline)
     # R8 大盘择时 OOS：评估满 20TD 的择时事件（前向指数收益）
     evaluate_vix_timing_pending(pipeline)
 
@@ -845,6 +852,8 @@ def run(non_interactive: bool = False,
     log_revision_events(date_str=date_str, pipeline=pipeline)
     # F4′ 残差动量 OOS：按周记录验证宇宙的 F4′ 末值（口径冻结见 PREREG-f4-forward.md，绝不回填）
     log_resmom_events(date_str=date_str, pipeline=pipeline)
+    # F5 回购强度 OOS：按周快照回购/流通市值等原始分量（无 PIT 历史，只能向前记，绝不回填；口径见 PREREG-f5-forward.md）
+    log_buyback_events(date_str=date_str, pipeline=pipeline)
     # R8 大盘择时 OOS：记录当日 live 触发（SETUP/CONFIRMED/WARNING）+ 指数入场价（绝不回填）
     log_vix_timing_event(date_str=date_str, swing=macro.swing_timing, index_prices=prices)
 
@@ -923,6 +932,7 @@ def run(non_interactive: bool = False,
     write_amihud_forward_report(date_str, output_dir)
     write_revision_forward_report(date_str, output_dir)
     write_resmom_forward_report(date_str, output_dir)
+    write_buyback_forward_report(date_str, output_dir)
     write_vix_timing_forward_report(date_str, output_dir)
 
     # ── 落盘：池快照 + 变更日志 ──────────────────────────
