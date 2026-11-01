@@ -68,6 +68,7 @@ from backtest.factor_forward_buyback import (
     evaluate_buyback_pending,
     write_buyback_forward_report,
 )
+from backtest.factor_forward_wide import wide_reminder
 from utils.time_utils   import today_str, prev_trading_day, is_trading_day
 from utils.housekeeping import cleanup_old_files
 
@@ -854,6 +855,8 @@ def run(non_interactive: bool = False,
     log_resmom_events(date_str=date_str, pipeline=pipeline)
     # F5 回购强度 OOS：按周快照回购/流通市值等原始分量（无 PIT 历史，只能向前记，绝不回填；口径见 PREREG-f5-forward.md）
     log_buyback_events(date_str=date_str, pipeline=pipeline)
+    # 宽宇宙前向记录（PREREG-wide-forward.md）单次约 15 分钟，不在这里跑，只提醒
+    wide_reminder(date_str)
     # R8 大盘择时 OOS：记录当日 live 触发（SETUP/CONFIRMED/WARNING）+ 指数入场价（绝不回填）
     log_vix_timing_event(date_str=date_str, swing=macro.swing_timing, index_prices=prices)
 
