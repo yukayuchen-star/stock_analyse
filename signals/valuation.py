@@ -172,9 +172,15 @@ def normalized_eps(fin: dict[str, pd.DataFrame],
     eps_end = pd.Timestamp(eps_window_end) if eps_window_end is not None else pd.Timestamp(max(eps.index))
     op_end = pd.Timestamp(max(op.index))
     out["normalized_basis"]["eps_window_end"] = str(eps_end)[:10]
-    if eps_end != op_end:
+    # 末季对齐不等于窗口连续：AMZN 缺 26Q2 时公共四季是 26Q3/26Q1/25Q4/25Q3，
+    # 两个 Q3 进了同一个「TTM」。相邻两列超过 120 天（一季最长约 98 天）即有缺季。
+    op_q = [pd.Timestamp(c) for c in op.index]
+    gaps = [f"{str(b)[:10]}→{str(a)[:10]}" for a, b in zip(op_q, op_q[1:]) if (a - b).days > 120]
+    if eps_end != op_end or gaps:
         mm = {"op_end": str(op_end)[:10], "eps_end": str(eps_end)[:10],
               "offset_quarters": round((eps_end - op_end).days / 91.31)}
+        if gaps:
+            mm["quarter_gaps"] = gaps
         same = [c for c in op.index if c in eps.index]   # 与营业利润同窗口的报告 EPS
         rep = float(eps[same].sum()) if len(same) == len(op) else 0.0
         mm["op_pre_tax_aligned"] = True
@@ -266,7 +272,8 @@ def valuation_band(ticker: str, price_df: pd.DataFrame, fin: dict[str, pd.DataFr
                     same += f"（报告口径 {out['oneoff_share']:.1%}，真值介于两者之间）"
             out["degraded"].append(
                 f"NORMALIZATION_WINDOW_MISMATCH(报告 EPS 窗口至 {mm['eps_end']}、"
-                f"正常化窗口至 {mm['op_end']}，错开 {mm['offset_quarters']} 季 → "
+                f"正常化窗口至 {mm['op_end']}，错开 {mm['offset_quarters']} 季"
+                f"{'，窗口缺季 ' + ', '.join(mm['quarter_gaps']) if mm.get('quarter_gaps') else ''} → "
                 f"pe_now_normalized/normalized_vs_mid/oneoff_share 三者同受影响，"
                 f"盈利增长期内 pe_now_normalized 偏高){same}")
     else:

@@ -39,7 +39,7 @@ LOG_INTERVAL_DAYS = 5
 RECORD_SPACING_TD = 5
 BOUNDARY_T = 2.5
 FIRST_LOOK_YEAR = 2027
-WORKERS = 4
+WORKERS = 2   # 首条记录 4 线程时 168 次 Yahoo 401；capex 用 2 线程为 0 次（运营参数，非因子口径）
 
 DB_PATH = ROOT / "cache" / "forward_signals.db"
 

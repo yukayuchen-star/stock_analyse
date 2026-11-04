@@ -434,6 +434,11 @@ def _consensus(yft, fin: dict[str, pd.DataFrame]) -> dict:
                                       if x.get("period") == "0q" and x.get("endDate")), None)
         except Exception:
             nxt["period_end"] = None
+        # 0q 不可能是已报过的季度。Yahoo 财报后数值先滚到下一季、endDate 可能还停在上一季
+        # （2026-11-03 AAPL：12 月季 $155.57B 贴 09-30 标签 ⇒ 假漂移 +36.9%），这里留空不推断。
+        _reported = (out.get("last_report") or {}).get("quarter")
+        if nxt.get("period_end") and _reported and nxt["period_end"] <= _reported:
+            nxt["period_end_stale"], nxt["period_end"] = nxt["period_end"], None
         out["next_quarter"] = nxt
 
     try:
@@ -995,7 +1000,9 @@ def main() -> int:
                 if drift.get("degraded"):
                     degraded.append(f"{t}:{drift['degraded']}")
         elif _nq.get("revenue_avg"):
-            degraded.append(f"{t}:DRIFT_UNLABELED(一致预期 0q 期末日取不到 → 无法分季，"
+            _st = _nq.get("period_end_stale")
+            degraded.append(f"{t}:DRIFT_UNLABELED(一致预期 0q 期末日"
+                            f"{f'{_st} 不晚于已报季度' if _st else '取不到'} → 无法分季，"
                             f"当日点不入漂移日志、本次不出漂移)")
         rec["consensus"] = cons
         nq = cons.get("next_quarter") or {}
