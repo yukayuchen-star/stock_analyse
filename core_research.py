@@ -18,7 +18,7 @@ import pandas as pd
 import yfinance as yf
 from loguru import logger
 
-from config.stocks import (BASE_FLOOR_FRAC, CORE_HOLDINGS, CORE_LEDGER_PATH,
+from config.stocks import (BASE_FLOOR_FRAC, CORE_ETFS, CORE_HOLDINGS, CORE_LEDGER_PATH,
                            CORE_TARGET_FRAC)
 from data.cache import SQLiteCache
 from data.edgar_source import EdgarSource
@@ -947,8 +947,8 @@ def main() -> int:
             }
             rec["technical"].update(_entry_window(chan, piv, price))
 
-        if t == "QQQ":
-            records[t] = rec   # 估值代理在个股跑完后补
+        if t in CORE_ETFS:
+            records[t] = rec   # QQQ 的估值代理在个股跑完后补；SCHD 没有估值带
             continue
 
         # ── Filings + 财务（EDGAR 优先 → yfinance 回退）──
@@ -1047,6 +1047,8 @@ def main() -> int:
         records["QQQ"]["valuation"] = qband
         records["QQQ"]["ledger"] = _ledger_stats(ledger, "QQQ", _last_close(qdf))
         degraded += [f"QQQ:{d}" for d in qband.get("degraded", [])]
+    if "SCHD" in records:
+        records["SCHD"]["ledger"] = _ledger_stats(ledger, "SCHD", _last_close(prices.get("SCHD")))
 
     degraded += edgar.degraded
     total_invested = sum(r.get("ledger", {}).get("invested", 0) or 0 for r in records.values())

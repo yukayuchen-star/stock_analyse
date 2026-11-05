@@ -16,7 +16,9 @@ PORTFOLIO_LOT_SIZE        = 1         # 美股按股交易，无整手限制
 # ── R9 双 Sleeve 架构（2026-08-18 用户确认）─────────────────
 # Core 70%：长持核心仓（基本面+估值+择时，advisory 手动执行，不进 paper 引擎）；
 # Tactical 30%：现有缠论×宏观×量化 swing 引擎（paper 组合语义收敛为仅战术 sleeve）。
-CORE_HOLDINGS: List[str] = ["NVDA", "AAPL", "GOOGL", "MSFT", "AMZN", "META", "QQQ"]
+CORE_HOLDINGS: List[str] = ["NVDA", "AAPL", "GOOGL", "MSFT", "AMZN", "META", "QQQ", "SCHD"]
+# 核心里的 ETF：没有财报、一致预期和裁决表，预取层跳过这些步骤
+CORE_ETFS: List[str] = ["QQQ", "SCHD"]
 CORE_TARGET_FRAC   = 0.70   # 核心仓目标占总资金比例（当前已建 ~20%，持续摊低成本补满）
 BASE_FLOOR_FRAC    = 0.70   # 每名底仓下限 = 该比例 × 已建仓位；其上为增强层（可高抛低吸）
 CORE_LEDGER_PATH   = "output/core_ledger.json"   # 真金台账（用户维护，skill 成本类结论的锚）

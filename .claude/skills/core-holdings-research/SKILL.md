@@ -1,6 +1,6 @@
 ---
 name: core-holdings-research
-description: R9 核心持仓（70% 长持 sleeve：NVDA/AAPL/GOOGL/MSFT/AMZN/META/QQQ）每日深度研究——读官方披露与财务趋势判 thesis、对齐公允价带、给底仓累积/增强层高抛低吸的可执行择时建议与目标价位。产出 output/{date}/核心持仓研究.md；战术侧已跑过时另出 统一操作指引.md（短线×长线合并执行单）。
+description: R9 核心持仓（70% 长持 sleeve：NVDA/AAPL/GOOGL/MSFT/AMZN/META/QQQ/SCHD）每日深度研究——读官方披露与财务趋势判 thesis、对齐公允价带、给底仓累积/增强层高抛低吸的可执行择时建议与目标价位。产出 output/{date}/核心持仓研究.md；战术侧已跑过时另出 统一操作指引.md（短线×长线合并执行单）。
 ---
 
 # 核心持仓每日研究（R9.4）
@@ -527,9 +527,15 @@ VIX 是**加码器不是门**：panic_accelerator=true ⇒ tranche 可加大；f
 QQQ 本无 thesis 减仓，故**底仓没有任何减仓触发**；越过 extreme 只写位置描述。增强层高抛
 （`price ≥ ceiling` 且 s1/s2 顶背驰，不破 `base_floor_shares`）不受影响。
 QQQ 无 thesis 风险、无一次性损益问题、无估值分位样本问题，是**基线资金最省判断的载体**
-——`policy` 里它的 `target_usd` 通常最大正是这个理由（`weighting_rationale` 记有原义）；
-它在 `baseline_plan` 里的摊额通常也最大，但那只是缺口占比的算术结果，不构成额外看多；
+——`policy` 给它较大目标正是这个理由（`weighting_rationale` 记有原义）；
+它在 `baseline_plan` 里的摊额只是缺口占比的算术结果，不构成额外看多；
 但报告须同时提示它与六只单票高度重叠（占其约四成），是集中押注的放大器而非分散化工具。
+
+### 4b. SCHD（2026-11-05 加入，规则见 `sleeves.md`）
+
+无公司 filings、无 thesis、无裁决表，预取层也不给估值带（`CORE_ETFS`）。**只走基线**：不参与加速器和增强层，没有减仓触发。
+报告只写 `baseline_plan` 摊额、结构位置（描述用，不是扳机）和建成度；不写三轴裁决，不造估值判断。
+缠论买卖点对它一律不产生动作。
 
 ### 5. 组合层汇总 + 落盘
 
